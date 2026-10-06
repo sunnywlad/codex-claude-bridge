@@ -625,9 +625,11 @@ switch (cmd) {
     }
     break
   }
-  case 'clear':
-    if (rest[0] !== '--bridge' || !validName(rest[1]) || rest.length !== 2) {
-      console.error('usage: bridge.mjs clear --bridge <name>')
+  case 'clear': {
+    const clearQueue = rest.includes('--queue')
+    if (rest[0] !== '--bridge' || !validName(rest[1]) || rest.some((arg, i) => i > 1 && arg !== '--queue') ||
+        (clearQueue && rest.filter(arg => arg === '--queue').length !== 1)) {
+      console.error('usage: bridge.mjs clear --bridge <name> [--queue]')
       process.exit(1)
     }
     setDir(process.cwd(), rest[1])
@@ -636,7 +638,12 @@ switch (cmd) {
       process.exit(1)
     }
     open()
+    if (clearQueue) {
+      for (const file of readdirSync(DIR).filter(name => /^queue-[0-9a-f-]+\.json$/.test(name)))
+        rmSync(join(DIR, file), { force: true })
+    }
     break
+  }
   default:
     console.error('usage: bridge.mjs hook [claude|codex]  |  bridge.mjs channel  |  bridge.mjs say [--bridge <name>] <text>  |  bridge.mjs send --bridge <name> <message>  |  bridge.mjs relay [--once] [--project <path>]  |  bridge.mjs clear --bridge <name>')
     process.exit(1)

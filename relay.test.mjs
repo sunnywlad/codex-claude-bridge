@@ -116,7 +116,8 @@ test('stale thread requests move to failed, warn in chat, and do not block the n
 
 test('clear --bridge resets chat and side states while preserving thread, member files, and queued messages', t => {
   const f = fixture(t)
-  const dir = f.bridge('alpha', 'thread-keep', [['pending', 'keep me']])
+  const pendingId = '33333333-3333-4333-8333-333333333333'
+  const dir = f.bridge('alpha', 'thread-keep', [[pendingId, 'keep me']])
 
   const result = f.run('clear', '--bridge', 'alpha')
 
@@ -126,5 +127,22 @@ test('clear --bridge resets chat and side states while preserving thread, member
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'claude.json'), 'utf8')), { first: '', seen: 0 })
   assert.equal(readFileSync(join(dir, 'claude.member.json'), 'utf8'), JSON.stringify({ id: 'alpha-claude', pid: 123 }))
   assert.equal(readFileSync(join(dir, 'codex.member.json'), 'utf8'), JSON.stringify({ id: 'alpha-codex', pid: 456 }))
-  assert.deepEqual(readdirSync(dir).filter(name => name.startsWith('queue-')), ['queue-pending.json'])
+  assert.deepEqual(readdirSync(dir).filter(name => name.startsWith('queue-')), [`queue-${pendingId}.json`])
+})
+
+test('clear --bridge --queue removes pending requests but keeps in-flight and failed records', t => {
+  const f = fixture(t)
+  const pendingId = '33333333-3333-4333-8333-333333333333'
+  const inflightId = '44444444-4444-4444-8444-444444444444'
+  const dir = f.bridge('alpha', 'thread-keep', [[pendingId, 'remove me']])
+  writeFileSync(join(dir, `inflight-${inflightId}.json`), JSON.stringify({ thread: 'thread-keep', message: 'already claimed' }))
+  mkdirSync(join(dir, 'failed'))
+  writeFileSync(join(dir, 'failed', 'old.json'), JSON.stringify({ reason: 'old failure' }))
+
+  const result = f.run('clear', '--bridge', 'alpha', '--queue')
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(readdirSync(dir).filter(name => name.startsWith('queue-')), [])
+  assert.ok(existsSync(join(dir, `inflight-${inflightId}.json`)))
+  assert.ok(existsSync(join(dir, 'failed', 'old.json')))
 })

@@ -86,6 +86,8 @@ node /home/wladimir/codex-bridge-patched/bridge.mjs clear --bridge alpha
 
 Run this from the project folder (`/home/wladimir` in the example). A new addressed conversation also clears that chat automatically. Individual conversations stop after 40 messages.
 
+Add `--queue` to also delete requests still waiting in `queue-*.json`. Requests already claimed as `inflight-*.json` and past failures in `failed/` are preserved.
+
 ## How it works
 
 `bridge.mjs` does three jobs. Each named bridge has its own chat and state files:
