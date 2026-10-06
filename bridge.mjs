@@ -46,21 +46,33 @@ function setDir(cwd, name = 'default') {
 
 const validName = name => typeof name === 'string' && /^[a-z][a-z0-9_-]{0,39}$/.test(name)
 const sessionFile = (side, id) => join(ROOT, 'sessions', `${side}-${createHash('sha256').update(id).digest('hex')}.json`)
+function claudePid(id) {
+  try {
+    for (const name of readdirSync(join(homedir(), '.claude', 'sessions'))) {
+      if (!/^\d+\.json$/.test(name)) continue
+      try {
+        const entry = JSON.parse(readFileSync(join(homedir(), '.claude', 'sessions', name), 'utf8'))
+        if (entry.sessionId === id && entry.cwd === dirname(ROOT) && Number.isInteger(entry.pid)) return entry.pid
+      } catch {}
+    }
+  } catch {}
+}
 function sessionName(side, id) {
   if (!id) return 'default'
   try { return JSON.parse(readFileSync(sessionFile(side, id), 'utf8')).name } catch { return 'default' }
 }
 function member(side, id, name) {
   if (!id || !validName(name)) return
+  const pid = side === 'claude' ? (claudePid(id) ?? process.ppid) : process.ppid
   mkdirSync(join(ROOT, 'sessions'), { recursive: true })
   writeFileSync(join(ROOT, '.gitignore'), '*\n')
-  writeFileSync(sessionFile(side, id), JSON.stringify({ id, name, pid: process.ppid }))
+  writeFileSync(sessionFile(side, id), JSON.stringify({ id, name, pid }))
   mkdirSync(DIR, { recursive: true })
   try {
     const previous = JSON.parse(readFileSync(join(DIR, `${side}.member.json`), 'utf8'))
     if (previous.id !== id) rmSync(side === 'claude' ? MARKER : WAITING, { force: true })
   } catch {}
-  writeFileSync(join(DIR, `${side}.member.json`), JSON.stringify({ id, pid: process.ppid }))
+  writeFileSync(join(DIR, `${side}.member.json`), JSON.stringify({ id, pid }))
 }
 function currentMember(side, id) {
   if (BRIDGE_NAME === 'default' || !id) return true

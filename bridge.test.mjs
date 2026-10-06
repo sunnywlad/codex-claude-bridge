@@ -472,6 +472,19 @@ test('two named Claude channels deliver only their own chat', async () => {
   }
 })
 
+test('Claude membership keeps the stable CLI PID across prompt and Stop hooks', async () => {
+  reset()
+  const home = join(DIR, 'claude-home')
+  const sessions = join(home, '.claude', 'sessions')
+  mkdirSync(sessions, { recursive: true })
+  writeFileSync(join(sessions, '424242.json'), JSON.stringify({ pid: 424242, sessionId: 'claude-alpha', cwd: DIR }))
+  await prompt('claude', 'discuss with codex bridge alpha: test', 'claude-alpha', { HOME: home })
+  const memberFile = join(BDIR, 'alpha', 'claude.member.json')
+  assert.equal(JSON.parse(readFileSync(memberFile, 'utf8')).pid, 424242)
+  assert.equal(await stop('claude', 'Unrelated status.', 'claude-alpha', {}, { HOME: home }), null)
+  assert.equal(JSON.parse(readFileSync(memberFile, 'utf8')).pid, 424242)
+})
+
 test('channel: MCP handshake, then pushes new Codex blocks as notifications and advances seen', async () => {
   reset()
   mkdirSync(BDIR, { recursive: true }); writeFileSync(CHAT, '')
