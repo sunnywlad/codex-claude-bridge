@@ -252,6 +252,44 @@ test('Claude Stop hook returns immediately when the channel is already alive', a
   reset()
 })
 
+test('Claude beta Stop returns promptly when its session channel is live', async () => {
+  reset()
+  const id = 'claude-beta-live-session'
+  const home = join(DIR, 'claude-beta-home')
+  const sessions = join(home, '.claude', 'sessions')
+  mkdirSync(sessions, { recursive: true })
+  writeFileSync(join(sessions, '424242.json'), JSON.stringify({ pid: 424242, sessionId: id, cwd: DIR }))
+  await prompt('claude', 'discuss with codex bridge beta: join', id, { HOME: home })
+  mkdirSync(join(BDIR, 'beta'), { recursive: true })
+  writeFileSync(CHAT, '')
+  writeFileSync(join(BDIR, 'beta', 'chat.md'), '')
+
+  const output = join(DIR, 'beta-channel.out')
+  const fd = openSync(output, 'w')
+  const channelProcess = spawn('sh', ['-c', 'sleep 10 | CODEX_BRIDGE_CHANNEL=1 CLAUDE_CODE_SESSION_ID="$1" HOME="$2" exec "$3" "$4" channel', 'bridge-test', id, home, process.execPath, BRIDGE], {
+    cwd: DIR,
+    env,
+    stdio: ['pipe', fd, 'inherit'],
+    detached: true,
+  })
+  try {
+    const deadline = Date.now() + 2000
+    while (!existsSync(join(BDIR, 'claude.channel')) && !existsSync(join(BDIR, 'beta', 'claude.channel')) && Date.now() < deadline)
+      await sleep(20)
+    assert.equal(channelProcess.exitCode, null, 'channel process should remain live')
+    const started = Date.now()
+    const result = await stop('claude', '@codex beta: live reply', id, {}, { HOME: home, CODEX_BRIDGE_WAIT_MS: '100' })
+    assert.ok(Date.now() - started < 250, 'beta Stop should return while its channel is active')
+    assert.equal(result, null)
+    assert.ok(existsSync(join(BDIR, 'beta', 'claude.channel')), 'session-scoped channel should claim beta marker')
+  } finally {
+    try { process.kill(-channelProcess.pid, 'SIGTERM') } catch {}
+    if (channelProcess.exitCode === null) await new Promise(resolve => channelProcess.once('exit', resolve))
+    closeSync(fd)
+    reset()
+  }
+})
+
 test('Claude Stop hook that opens the bridge returns once the channel claims the folder a moment later', async () => {
   reset()
   const claudeStop = stop('claude', '@codex Redis or Memcached?')

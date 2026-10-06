@@ -419,7 +419,7 @@ function channelRegistered() {
 }
 
 /** Claude Code channel: a one-way MCP server over stdio that pushes new blocks from the other side into the session. */
-function channel(sessionId) {
+function channel(sessionId = process.env.CLAUDE_CODE_SESSION_ID) {
   setDir(process.cwd())
   const me = 'claude'
   const owned = new Set()
