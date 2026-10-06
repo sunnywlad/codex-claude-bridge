@@ -74,7 +74,7 @@ The relay watches all named bridges in that project and works independently of C
 node bridge.mjs send --bridge alpha "Audit the report and reply briefly"
 ```
 
-The relay passes the request to `codex queue` using the saved Codex session ID. A project-wide `flock` allows only one relay at a time; it atomically renames each request to `inflight-*.json` before sending. Pending requests remain as `queue-*.json` until delivery succeeds. Requests for a replaced Codex thread move to that bridge's `failed/` folder with a reason, and the chat receives a warning. Claude Code does not need to be open for this path. For a one-time attempt, use `node bridge.mjs relay --once --project /home/wladimir` from a normal terminal.
+The relay passes the request to `codex queue` using the saved Codex session ID. A project-wide `flock` allows only one relay at a time; it atomically renames each request to `inflight-*.json` before sending. A failed send gets three attempts with 1 s and 3 s waits between them. Requests that still fail, or target a replaced Codex thread, move to that bridge's `failed/` folder with a reason, and the chat receives a warning. Claude Code does not need to be open for this path. For a one-time attempt, use `node bridge.mjs relay --once --project /home/wladimir` from a normal terminal.
 
 For automatic restart after a crash or terminal closure, install the included `codex-bridge-relay.service` as a user service. Check its `ExecStart` Node path before installing it. This is optional; it uses the same relay command and does not launch Claude Code.
 

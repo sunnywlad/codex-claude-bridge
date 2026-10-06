@@ -33,6 +33,8 @@ import { promisify } from 'node:util'
 const VERSION = '0.2.0'
 const WAIT_MS = Number(process.env.CODEX_BRIDGE_WAIT_MS ?? 570_000) // stay under the 600s hook timeout
 const MAX_MSGS = 40
+const QUEUE_RETRIES = 3
+const DEFAULT_QUEUE_RETRY_DELAYS_MS = [1000, 3000]
 const MARK = /^## (claude|codex|user|bridge) @ \d{4}-\d\d-\d\dT[\d:.]+Z$/
 const SIDES = ['claude', 'codex']
 const NAMES = { claude: 'Claude Code', codex: 'Codex CLI' }
@@ -205,6 +207,11 @@ async function drainQueue() {
       if (err.code !== 'ENOENT') throw err
     }
   }
+  let allOk = true
+  const configuredDelays = process.env.CODEX_BRIDGE_RETRY_DELAYS_MS?.split(',').map(Number)
+  const retryDelays = configuredDelays?.length === 2 && configuredDelays.every(delay => Number.isFinite(delay) && delay >= 0)
+    ? configuredDelays
+    : DEFAULT_QUEUE_RETRY_DELAYS_MS
   for (const file of readdirSync(DIR).filter(name => /^queue-[0-9a-f-]+\.json$/.test(name))) {
     const path = join(DIR, file)
     const claimed = join(DIR, file.replace(/^queue-/, 'inflight-'))
@@ -230,8 +237,31 @@ async function drainQueue() {
         append('bridge', `Queued Codex request ${failedName} failed: ${reason}. Details: failed/${failedName}`)
         continue
       }
-      await execFileAsync(process.env.CODEX_BRIDGE_CODEX_BIN || 'codex',
-        ['queue', '--thread', thread, '--message', message], { timeout: 30_000 })
+      let sent = false
+      let lastError
+      for (let attempt = 0; attempt < QUEUE_RETRIES; attempt++) {
+        try {
+          await execFileAsync(process.env.CODEX_BRIDGE_CODEX_BIN || 'codex',
+            ['queue', '--thread', thread, '--message', message], { timeout: 30_000 })
+          sent = true
+          break
+        } catch (err) {
+          lastError = err
+          if (attempt < QUEUE_RETRIES - 1) await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]))
+        }
+      }
+      if (!sent) {
+        const reason = `codex queue failed after ${QUEUE_RETRIES} attempts: ${lastError?.message ?? 'unknown error'}`
+        const failedDir = join(DIR, 'failed')
+        mkdirSync(failedDir, { recursive: true })
+        const failedName = file.replace(/^queue-/, '')
+        writeFileSync(join(failedDir, failedName), JSON.stringify({ ...request, attempts: QUEUE_RETRIES, failedAt: new Date().toISOString(), reason }))
+        rmSync(claimed)
+        if (!existsSync(CHAT)) writeFileSync(CHAT, '')
+        append('bridge', `Queued Codex request ${failedName} failed after ${QUEUE_RETRIES} attempts: ${lastError?.message ?? 'unknown error'}. Details: failed/${failedName}`)
+        allOk = false
+        continue
+      }
       rmSync(claimed)
     } catch (err) {
       try { renameSync(claimed, path) } catch {}
@@ -239,7 +269,7 @@ async function drainQueue() {
       return false
     }
   }
-  return true
+  return allOk
 }
 
 async function relayAll(project) {
