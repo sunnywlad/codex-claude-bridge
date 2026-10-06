@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 /**
- * Codex Bridge — Claude Code <-> Codex CLI in one folder, through named chats. No server.
+ * Codex Bridge — Claude Code <-> Codex CLI in one folder, through named chats.
  *
  *   node bridge.mjs hook      Stop + UserPromptSubmit hook for both tools (side auto-detected)
  *   node bridge.mjs channel   Claude Code channel (MCP over stdio): pushes Codex's messages into Claude
  *   node bridge.mjs say ...   append a message as the human observer
+ *   node bridge.mjs relay ... relay queued Codex messages independently of Claude
+ *   node bridge.mjs clear ... clear one named conversation's transcript
  *
  * Chats live in ./.codex-bridge/<name>/chat.md (or chat.md at the root for default).
  * One block per message:
@@ -105,8 +107,8 @@ function open() {
   mkdirSync(DIR, { recursive: true })
   writeFileSync(CHAT, '')
   writeFileSync(join(DIR, '.gitignore'), '*\n') // keep the chat out of the repo
-  for (const s of SIDES) rmSync(stateFile(s), { force: true })
-  if (thread) writeFileSync(stateFile('codex'), JSON.stringify({ first: '', seen: 0, thread }))
+  writeFileSync(stateFile('claude'), JSON.stringify({ first: '', seen: 0 }))
+  writeFileSync(stateFile('codex'), JSON.stringify({ first: '', seen: 0, ...(thread ? { thread } : {}) }))
 }
 
 function append(from, text) {
@@ -210,6 +212,26 @@ async function drainQueue() {
     }
   }
   return true
+}
+
+async function relayAll(project) {
+  setDir(project)
+  const names = ['default']
+  try {
+    for (const name of readdirSync(ROOT)) {
+      if (validName(name) && name !== 'default' && statSync(join(ROOT, name)).isDirectory()) names.push(name)
+    }
+  } catch (err) {
+    if (err.code === 'ENOENT') return true
+    throw err
+  }
+  let ok = true
+  for (const name of names) {
+    setDir(project, name)
+    if (!existsSync(DIR)) continue
+    if (!await drainQueue()) ok = false
+  }
+  return ok
 }
 
 function changed() {
@@ -382,8 +404,6 @@ function channel(sessionId) {
   setDir(process.cwd())
   const me = 'claude'
   const owned = new Set()
-  let nextQueueAttempt = 0
-  let draining = false
   const selectBridge = () => {
     setDir(process.cwd())
     if (sessionId) {
@@ -444,10 +464,6 @@ function channel(sessionId) {
     if (!channelAlive()) writeFileSync(MARKER, String(process.pid))     // claim delivery for this folder
     if (Number(readFileSync(MARKER, 'utf8')) !== process.pid) return    // another Claude session's channel owns it
     owned.add(MARKER)
-    if (!draining && Date.now() >= nextQueueAttempt) {
-      draining = true
-      void drainQueue().then(ok => { if (!ok) nextQueueAttempt = Date.now() + 5000 }).finally(() => { draining = false })
-    }
     let all
     try { all = parse() } catch { return }
     if (!all) return
@@ -506,7 +522,45 @@ switch (cmd) {
     setDir(process.cwd(), rest[1])
     if (!await drainQueue()) process.exit(1)
     break
+  case 'relay': {
+    let project = process.cwd()
+    let once = false
+    let valid = true
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--once' && !once) once = true
+      else if (rest[i] === '--project' && rest[i + 1] && !rest[i + 1].startsWith('--')) project = rest[++i]
+      else valid = false
+    }
+    if (!valid) {
+      console.error('usage: bridge.mjs relay [--once] [--project <path>]')
+      process.exit(1)
+    }
+    if (once) {
+      if (!await relayAll(project)) process.exitCode = 1
+    } else {
+      console.error(`codex-bridge relay: watching ${join(project, '.codex-bridge')}`)
+      while (true) {
+        let ok = false
+        try { ok = await relayAll(project) }
+        catch (err) { console.error(`codex-bridge relay: ${err.message}`) }
+        await new Promise(resolve => setTimeout(resolve, ok ? 1000 : 5000))
+      }
+    }
+    break
+  }
+  case 'clear':
+    if (rest[0] !== '--bridge' || !validName(rest[1]) || rest.length !== 2) {
+      console.error('usage: bridge.mjs clear --bridge <name>')
+      process.exit(1)
+    }
+    setDir(process.cwd(), rest[1])
+    if (!existsSync(CHAT)) {
+      console.error(`bridge ${rest[1]} is not open`)
+      process.exit(1)
+    }
+    open()
+    break
   default:
-    console.error('usage: bridge.mjs hook [claude|codex]  |  bridge.mjs channel  |  bridge.mjs say [--bridge <name>] <text>  |  bridge.mjs send --bridge <name> <message>')
+    console.error('usage: bridge.mjs hook [claude|codex]  |  bridge.mjs channel  |  bridge.mjs say [--bridge <name>] <text>  |  bridge.mjs send --bridge <name> <message>  |  bridge.mjs relay [--once] [--project <path>]  |  bridge.mjs clear --bridge <name>')
     process.exit(1)
 }

@@ -62,13 +62,29 @@ To send a note into one open named chat from the terminal:
 node bridge.mjs say --bridge alpha "Please check the latest result"
 ```
 
-To give an idle Codex session a task from a sandbox that cannot run `codex queue`, use:
+To give an idle Codex session a task from a sandbox that cannot run `codex queue`, start one relay in a normal terminal for the project:
+
+```bash
+node /home/wladimir/codex-bridge-patched/bridge.mjs relay --project /home/wladimir
+```
+
+The relay watches all named bridges in that project and works independently of Claude sessions. Keep it running while you want automatic delivery. Then, from a Codex sandbox in the same project, use:
 
 ```bash
 node bridge.mjs send --bridge alpha "Audit the report and reply briefly"
 ```
 
-The matching Claude channel relays this request to `codex queue` without asking the Claude model to act. Pending requests remain as `queue-*.json` until the relay succeeds. Restart Claude Code after updating the bridge so its long-running channel loads this behavior.
+The relay passes the request to `codex queue` using the saved Codex session ID. Pending requests remain as `queue-*.json` until delivery succeeds. Claude Code does not need to be open for this path. For a one-time attempt, use `node bridge.mjs relay --once --project /home/wladimir` from a normal terminal.
+
+For automatic restart after a crash or terminal closure, install the included `codex-bridge-relay.service` as a user service. Check its `ExecStart` Node path before installing it. This is optional; it uses the same relay command and does not launch Claude Code.
+
+To clear one named chat and its read positions while keeping the paired session IDs and pending requests:
+
+```bash
+node /home/wladimir/codex-bridge-patched/bridge.mjs clear --bridge alpha
+```
+
+Run this from the project folder (`/home/wladimir` in the example). A new addressed conversation also clears that chat automatically. Individual conversations stop after 40 messages.
 
 ## How it works
 
