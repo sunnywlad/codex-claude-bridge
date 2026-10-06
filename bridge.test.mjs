@@ -90,7 +90,7 @@ test('@claude at the start of a Codex reply opens the bridge, strips the prefix,
   assert.equal(chat(), chat().match(/^## codex @ [^\n]+\nRedis or Memcached for caching\?\n\n$/)?.[0])
   assert.equal(readFileSync(join(BDIR, '.gitignore'), 'utf8'), '*\n')
   assert.match(await prompt('claude', 'hi'), /Unread from the bridge:\n\n\[codex\] Redis or Memcached for caching\?/) // idle Claude, no channel: a prompt catches it up
-  const claudeWaiting = stop('claude', 'Redis, it has persistence. [DONE]')
+  const claudeWaiting = stop('claude', '@codex Redis, it has persistence. [DONE]')
   assert.match((await codexWaiting).reason, /New message via codex-bridge:\n\n\[claude\] Redis, it has persistence\. \[DONE\]/)
   assert.ok(!existsSync(join(BDIR, 'codex.waiting')))
   assert.equal(await claudeWaiting, null) // conversation over
@@ -102,7 +102,7 @@ test('a new @-addressed reply after [DONE] starts a fresh conversation', async (
   const codexWaiting = openWith('codex', 'Next topic: sharding?')
   await sleep(400)
   assert.match(chat(), /^## codex @ [^\n]+\nNext topic: sharding\?\n\n$/) // old conversation gone
-  const claudeWaiting = stop('claude', 'By tenant. [DONE]')
+  const claudeWaiting = stop('claude', '@codex By tenant. [DONE]')
   assert.match((await codexWaiting).reason, /\[claude\] By tenant\./)
   await claudeWaiting
 })
@@ -112,6 +112,8 @@ test('prompt context: an open bridge adds instructions only when the prompt name
   assert.equal(await prompt('codex', 'refactor the parser with claude'), null) // bare name is not a trigger
   const ctx = await prompt('codex', 'Discuss caching with claude bridge')
   assert.match(ctx, /Claude Bridge: .*start your reply with @claude/i)
+  assert.match(ctx, /If you are replying to the user, answer normally without that prefix/i)
+  assert.doesNotMatch(ctx, /a reply to a bridge message is forwarded/i)
   assert.match(ctx, /Do not use the `claude` CLI or any MCP tool/)
   assert.ok(!existsSync(CHAT)) // context alone does not open anything
   const codexWaiting = openWith('codex', 'Q')
@@ -129,7 +131,7 @@ test('prompt hook hands over unread messages, so a plain prompt to an idle Codex
   await sleep(300)
   const ctx = await prompt('codex', 'go')
   assert.match(ctx, /Unread from the bridge:\n\n\[claude\] Should we shard by tenant\?/)
-  const codexWaiting = stop('codex', 'Yes, by tenant.') // seen already advanced: no re-delivery, it waits
+  const codexWaiting = stop('codex', '@claude Yes, by tenant.') // seen already advanced: no re-delivery, it waits
   assert.match((await claudeWaiting).reason, /\[codex\] Yes, by tenant\./)
   reset()
   await codexWaiting
@@ -153,11 +155,11 @@ test('a message that lands while I am mid-turn is delivered on my next stop, not
   await stop('codex', '[WAITING]')                        // codex has A1 and is "thinking"
   await run(['say', 'U1'])                                // human interjects
   assert.match((await claudeWaiting).reason, /\[user\] U1/) // claude is now "thinking" about U1
-  assert.match((await stop('codex', 'C1')).reason, /\[user\] U1/) // codex replies to A1 and also sees U1
-  const claudeGot = await stop('claude', 'A2')            // claude finishes its U1 turn
+  assert.match((await stop('codex', '@claude C1')).reason, /\[user\] U1/) // codex replies to A1 and also sees U1
+  const claudeGot = await stop('claude', '@codex A2')      // claude finishes its U1 turn
   assert.match(claudeGot.reason, /\[codex\] C1/)          // C1 was not skipped
   assert.ok(!claudeGot.reason.includes('[user] U1'))      // and U1 is not shown twice
-  assert.match((await stop('codex', 'Noted.')).reason, /\[claude\] A2/)
+  assert.match((await stop('codex', '@claude Noted.')).reason, /\[claude\] A2/)
 })
 
 test('[WAITING] on a later turn waits; it does not re-deliver the last message', async () => {
@@ -176,7 +178,7 @@ test('side is detected from the Codex payload when no side is given', async () =
   reset()
   const claudeWaiting = openWith('claude', 'Who are you?')
   await sleep(300)
-  const out = JSON.parse(await run(['hook'], JSON.stringify({ hook_event_name: 'Stop', cwd: DIR, session_id: 'x', turn_id: 't1', last_assistant_message: 'Codex here.' })))
+  const out = JSON.parse(await run(['hook'], JSON.stringify({ hook_event_name: 'Stop', cwd: DIR, session_id: 'x', turn_id: 't1', last_assistant_message: '@claude Codex here.' })))
   assert.match(out.reason, /\[claude\] Who are you\?/)
   assert.match((await claudeWaiting).reason, /\[codex\] Codex here\./)
   assert.match(chat(), /## codex @ [^\n]+\nCodex here\./)
@@ -189,7 +191,7 @@ test('quoted markers: mid-sentence [DONE] does not end, a quoted header line doe
   const claudeGot = await stop('claude', '[WAITING]')
   assert.ok(claudeGot.reason.includes('[codex] I will say [DONE] when we agree. Your last block was:\n ## codex @ 2026-01-01T00:00:00.000Z\nhello'))
   assert.ok(!claudeGot.reason.includes('[codex] hello'))
-  const claudeWaiting = stop('claude', 'Fine.')
+  const claudeWaiting = stop('claude', '@codex Fine.')
   assert.match((await codexWaiting).reason, /\[claude\] Fine\./) // still open
   reset()
   await claudeWaiting
@@ -209,8 +211,8 @@ test('message cap closes the conversation', async () => {
   reset()
   mkdirSync(BDIR, { recursive: true }); writeFileSync(CHAT, '')
   for (let i = 0; i < 40; i++) await run(['say', `m${i}`])
-  assert.match((await stop('claude', 'hi')).reason, /\[user\] m39/) // backlog is delivered first
-  assert.equal(await stop('claude', 'again'), null)
+  assert.match((await stop('claude', '@codex hi')).reason, /\[user\] m39/) // backlog is delivered first
+  assert.equal(await stop('claude', '@codex again'), null)
   assert.match(chat(), /## bridge @ [^\n]+\nMessage cap \(40\) reached\. \[DONE\]/)
 })
 
@@ -454,10 +456,34 @@ test('named bridge ignores unrelated replies and forwards a reply to a delivered
   rmSync(join(BDIR, 'alpha', 'claude.channel'))
   assert.match(await prompt('claude', 'continue', 'claude-alpha'), /\[codex\] question/)
   writeFileSync(join(BDIR, 'alpha', 'claude.channel'), String(process.pid))
-  assert.equal(await stop('claude', 'Answer.', 'claude-alpha', {}, wakeEnv), null)
+  assert.equal(await stop('claude', '@codex alpha: Answer.', 'claude-alpha', {}, wakeEnv), null)
   assert.match(readFileSync(join(BDIR, 'alpha', 'chat.md'), 'utf8'), /## claude @ [^\n]+\nAnswer\./)
   assert.equal(await stop('claude', 'Another status.', 'claude-alpha'), null)
   assert.doesNotMatch(readFileSync(join(BDIR, 'alpha', 'chat.md'), 'utf8'), /Another status/)
+})
+
+test('Stop forwards a bridge response only when it is explicitly addressed', async () => {
+  reset()
+  await prompt('claude', 'discuss with codex bridge alpha: test', 'claude-alpha')
+  await prompt('codex', 'discuss with claude bridge alpha: test', 'codex-alpha')
+  const file = join(BDIR, 'alpha', 'chat.md')
+  writeFileSync(join(BDIR, 'alpha', 'claude.channel'), String(process.pid))
+  await stop('codex', '@claude alpha: What is your UID?', 'codex-alpha', {}, { CODEX_BRIDGE_WAIT_MS: '0' })
+  rmSync(join(BDIR, 'alpha', 'claude.channel'))
+  await prompt('claude', 'continue', 'claude-alpha')
+  writeFileSync(join(BDIR, 'alpha', 'claude.channel'), String(process.pid))
+
+  await stop('claude', 'My UID is 12345.', 'claude-alpha')
+  assert.doesNotMatch(readFileSync(file, 'utf8'), /My UID is 12345/)
+
+  await stop('claude', '@codex alpha: My UID is 12345.', 'claude-alpha')
+  assert.match(readFileSync(file, 'utf8'), /My UID is 12345/)
+
+  await stop('codex', '[WAITING]', 'codex-alpha')
+  await stop('codex', 'My answer to Wladimir.', 'codex-alpha')
+  assert.doesNotMatch(readFileSync(file, 'utf8'), /My answer to Wladimir/)
+  await stop('codex', '@claude alpha: My answer to Wladimir.', 'codex-alpha')
+  assert.match(readFileSync(file, 'utf8'), /My answer to Wladimir/)
 })
 
 test('default bridge also leaves unrelated status replies local', async () => {
