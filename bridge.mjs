@@ -20,8 +20,9 @@
  * Per-side state in ./.codex-bridge/<side>.json: how many blocks that side has seen.
  */
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 
 const VERSION = '0.2.0'
 const WAIT_MS = Number(process.env.CODEX_BRIDGE_WAIT_MS ?? 570_000) // stay under the 600s hook timeout
@@ -30,11 +31,12 @@ const MARK = /^## (claude|codex|user|bridge) @ \d{4}-\d\d-\d\dT[\d:.]+Z$/
 const SIDES = ['claude', 'codex']
 const NAMES = { claude: 'Claude Code', codex: 'Codex CLI' }
 
-let DIR, CHAT, MARKER
+let DIR, CHAT, MARKER, WAITING
 function setDir(cwd) {
   DIR = join(cwd, '.codex-bridge')
   CHAT = join(DIR, 'chat.md')
   MARKER = join(DIR, 'claude.channel') // pid of the channel process that delivers to Claude
+  WAITING = join(DIR, 'codex.waiting')
 }
 
 /** Blocks in the file, or null while another writer's block is still landing (every complete block ends with a blank line). */
@@ -52,10 +54,13 @@ function parse() {
 }
 
 function open() {
+  let thread
+  try { thread = JSON.parse(readFileSync(stateFile('codex'), 'utf8')).thread } catch {}
   mkdirSync(DIR, { recursive: true })
   writeFileSync(CHAT, '')
   writeFileSync(join(DIR, '.gitignore'), '*\n') // keep the chat out of the repo
   for (const s of SIDES) rmSync(stateFile(s), { force: true })
+  if (thread) writeFileSync(stateFile('codex'), JSON.stringify({ first: '', seen: 0, thread }))
 }
 
 function append(from, text) {
@@ -73,7 +78,7 @@ const stateFile = me => join(DIR, `${me}.json`)
 function loadState(me, first) {
   let s = { first: '', seen: 0 } // conversation key, blocks shown
   try { s = JSON.parse(readFileSync(stateFile(me), 'utf8')) } catch {}
-  if (s.first && s.first !== first) s = { first: '', seen: 0 } // a different conversation: forget the old one
+  if (s.first && s.first !== first) s = { first: '', seen: 0, thread: s.thread } // a different conversation: forget the old one
   s.first = first
   return s
 }
@@ -81,6 +86,59 @@ const saveState = (me, s) => writeFileSync(stateFile(me), JSON.stringify(s))
 
 const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
 const channelAlive = () => { try { return alive(Number(readFileSync(MARKER, 'utf8'))) } catch { return false } }
+const codexWaiting = () => { try { return alive(Number(readFileSync(WAITING, 'utf8'))) } catch { return false } }
+
+function firstLine(file) {
+  const fd = openSync(file, 'r')
+  const byte = Buffer.alloc(1)
+  const bytes = []
+  try {
+    while (readSync(fd, byte, 0, 1, null)) {
+      if (byte[0] === 10) break
+      bytes.push(byte[0])
+    }
+  } finally { closeSync(fd) }
+  return Buffer.from(bytes).toString('utf8')
+}
+
+function discoverCodexThread() {
+  const root = process.env.CODEX_BRIDGE_SESSIONS || join(homedir(), '.codex', 'sessions')
+  const files = []
+  for (let day = 0; day < 3; day++) {
+    const date = new Date(Date.now() - day * 86_400_000).toISOString().slice(0, 10).replaceAll('-', '/')
+    const dir = join(root, date)
+    try {
+      for (const name of readdirSync(dir)) {
+        if (!/^rollout-.*\.jsonl$/.test(name)) continue
+        try {
+          const file = join(dir, name)
+          const stat = statSync(file)
+          if (stat.isFile()) files.push({ file, mtime: stat.mtimeMs })
+        } catch {} // a file may disappear during discovery
+      }
+    } catch {} // a day may have no session directory
+  }
+  files.sort((a, b) => b.mtime - a.mtime)
+  for (const { file } of files.slice(0, 20)) {
+    try {
+      const meta = JSON.parse(firstLine(file))
+      if (meta.type === 'session_meta' && meta.payload?.originator === 'codex-tui' &&
+          meta.payload.cwd === dirname(DIR) && typeof meta.payload.id === 'string' && meta.payload.id) return meta.payload.id
+    } catch {} // ignore incomplete or invalid rollouts
+  }
+}
+
+function wakeCodex() {
+  if (codexWaiting()) return
+  try {
+    let thread
+    try { thread = JSON.parse(readFileSync(stateFile('codex'), 'utf8')).thread } catch {}
+    thread = process.env.CODEX_BRIDGE_THREAD || thread || discoverCodexThread()
+    if (typeof thread !== 'string' || !thread.trim()) return
+    execFileSync(process.env.CODEX_BRIDGE_CODEX_BIN || 'codex',
+      ['queue', '--thread', thread, '--message', 'New message available.'], { timeout: 30_000 })
+  } catch {} // a failed wake must not break Claude's hook
+}
 
 function changed() {
   // wake on file change; 2s fallback tick in case an event is missed
@@ -134,10 +192,32 @@ function promptHook(me, other, input) {
 }
 
 async function hook(arg) {
-  const input = JSON.parse(readFileSync(0, 'utf8') || '{}')
+  const raw = readFileSync(0, 'utf8')
+  const input = JSON.parse(raw || '{}')
   setDir(input.cwd ?? process.cwd())
   const me = side(arg, input)
   const other = me === 'claude' ? 'codex' : 'claude'
+  if (process.env.CODEX_BRIDGE_DEBUG !== undefined ||
+      existsSync(join(DIR, 'debug')) ||
+      existsSync(join(homedir(), '.codex-bridge', 'debug'))) {
+    mkdirSync(DIR, { recursive: true })
+    writeFileSync(join(DIR, `debug-${me}.json`), JSON.stringify({
+      input: raw,
+      cwd: process.cwd(),
+      ppid: process.ppid,
+      envKeys: Object.keys(process.env),
+      bridgeEnv: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('CODEX_BRIDGE_')))
+    }))
+  }
+  if (me === 'codex') {
+    const thread = process.env.CODEX_BRIDGE_THREAD || input.session_id || input.thread_id
+    if (typeof thread === 'string' && thread.trim()) {
+      mkdirSync(DIR, { recursive: true })
+      let state = { first: '', seen: 0 }
+      try { state = JSON.parse(readFileSync(stateFile(me), 'utf8')) } catch {}
+      saveState(me, { ...state, thread })
+    }
+  }
   if (input.hook_event_name === 'UserPromptSubmit') return promptHook(me, other, input)
 
   let mine = input.last_assistant_message?.trim() ?? ''
@@ -150,14 +230,18 @@ async function hook(arg) {
   const state = bind(me, all)
   const unread = () => all.slice(state.seen).filter(b => b.from !== me)
   if (done(all) && !unread().length) return // conversation over: later chatter is not logged
-  if (mine && !tagged(mine, '[WAITING]')) append(me, mine)
+  if (mine && !tagged(mine, '[WAITING]')) {
+    append(me, mine)
+    if (me === 'claude') wakeCodex()
+  }
   if (me === 'claude') for (let i = 0; i < 4; i++) { // the channel claims a fresh bridge within one tick: give it a moment
     if (channelAlive()) return // the channel wakes Claude; no need to hold the terminal
     await new Promise(r => setTimeout(r, 500))
   }
 
   const deadline = Date.now() + WAIT_MS
-  while (existsSync(CHAT)) {
+  if (me === 'codex') writeFileSync(WAITING, String(process.pid))
+  try { while (existsSync(CHAT)) {
     let parsed
     try { parsed = parse() } catch { return } // removed mid-wait
     if (parsed) {
@@ -183,6 +267,10 @@ async function hook(arg) {
       return
     }
     await changed()
+  } } finally {
+    if (me === 'codex') {
+      try { if (Number(readFileSync(WAITING, 'utf8')) === process.pid) rmSync(WAITING) } catch {}
+    }
   }
 }
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -9,12 +9,22 @@ const DIR = mkdtempSync(join(tmpdir(), 'codex-bridge-'))
 const BDIR = join(DIR, '.codex-bridge')
 const CHAT = join(BDIR, 'chat.md')
 const BRIDGE = new URL('./bridge.mjs', import.meta.url).pathname
-const env = { ...process.env, CODEX_BRIDGE_WAIT_MS: '3000' }
+const FAKE_CODEX = join(DIR, 'fake-codex')
+const WAKE_LOG = join(DIR, 'wake-log')
+const SESSION_ROOT = join(DIR, 'sessions')
+writeFileSync(FAKE_CODEX, '#!/usr/bin/env node\nrequire("node:fs").appendFileSync(process.env.CODEX_BRIDGE_WAKE_LOG, JSON.stringify(process.argv.slice(2)) + "\\n")\n')
+chmodSync(FAKE_CODEX, 0o755)
+const env = { ...process.env, CODEX_BRIDGE_WAIT_MS: '3000', CODEX_BRIDGE_SESSIONS: SESSION_ROOT }
 delete env.PLUGIN_DATA
 delete env.CODEX_BRIDGE_CHANNEL
+delete env.CODEX_BRIDGE_THREAD
+delete env.CODEX_BRIDGE_DEBUG
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const chat = () => readFileSync(CHAT, 'utf8')
-const reset = () => rmSync(BDIR, { recursive: true, force: true })
+const reset = () => {
+  rmSync(BDIR, { recursive: true, force: true })
+  rmSync(SESSION_ROOT, { recursive: true, force: true })
+}
 
 function run(args, stdin = '', extraEnv = {}) {
   return new Promise(resolve => {
@@ -27,17 +37,34 @@ function run(args, stdin = '', extraEnv = {}) {
 }
 
 /** Stop hook for one side; resolves with its JSON output (or null). */
-async function stop(side, msg, session = `${side}-1`, extra = {}) {
-  const out = await run(['hook', side], JSON.stringify({ hook_event_name: 'Stop', cwd: DIR, session_id: session, last_assistant_message: msg, ...extra }))
+async function stop(side, msg, session = `${side}-1`, extra = {}, extraEnv = {}) {
+  const out = await run(['hook', side], JSON.stringify({ hook_event_name: 'Stop', cwd: DIR, session_id: session, last_assistant_message: msg, ...extra }), extraEnv)
   return out ? JSON.parse(out) : null
 }
 /** UserPromptSubmit hook for one side; resolves with additionalContext (or null). */
-async function prompt(side, text, session = `${side}-1`) {
-  const out = await run(['hook', side], JSON.stringify({ hook_event_name: 'UserPromptSubmit', cwd: DIR, session_id: session, prompt: text }))
+async function prompt(side, text, session = `${side}-1`, extraEnv = {}) {
+  const out = await run(['hook', side], JSON.stringify({ hook_event_name: 'UserPromptSubmit', cwd: DIR, session_id: session, prompt: text }), extraEnv)
   return out ? JSON.parse(out).hookSpecificOutput.additionalContext : null
 }
 /** A codex reply that opens the bridge and waits for claude. */
 const openWith = (side, msg) => stop(side, `@${side === 'codex' ? 'claude' : 'codex'} ${msg}`)
+const wakeEnv = { CODEX_BRIDGE_CODEX_BIN: FAKE_CODEX, CODEX_BRIDGE_WAKE_LOG: WAKE_LOG }
+const wakeCalls = () => existsSync(WAKE_LOG) ? readFileSync(WAKE_LOG, 'utf8').trim().split('\n').map(JSON.parse) : []
+function readyToWake() {
+  reset()
+  rmSync(WAKE_LOG, { force: true })
+  mkdirSync(BDIR, { recursive: true })
+  writeFileSync(CHAT, '')
+  writeFileSync(join(BDIR, 'claude.channel'), String(process.pid))
+}
+function rollout(name, payload, modified, daysAgo = 0) {
+  const date = new Date(Date.now() - daysAgo * 86_400_000).toISOString().slice(0, 10).replaceAll('-', '/')
+  const folder = join(SESSION_ROOT, date)
+  mkdirSync(folder, { recursive: true })
+  const file = join(folder, `rollout-${name}.jsonl`)
+  writeFileSync(file, JSON.stringify({ type: 'session_meta', payload }) + '\nnot JSON on line two\n')
+  utimesSync(file, modified, modified)
+}
 
 test('no bridge and no @-address: hooks are no-ops', async () => {
   reset()
@@ -50,11 +77,13 @@ test('@claude at the start of a Codex reply opens the bridge, strips the prefix,
   reset()
   const codexWaiting = openWith('codex', 'Redis or Memcached for caching?')
   await sleep(400)
+  assert.ok(existsSync(join(BDIR, 'codex.waiting')))
   assert.equal(chat(), chat().match(/^## codex @ [^\n]+\nRedis or Memcached for caching\?\n\n$/)?.[0])
   assert.equal(readFileSync(join(BDIR, '.gitignore'), 'utf8'), '*\n')
   assert.match(await prompt('claude', 'hi'), /Unread from the bridge:\n\n\[codex\] Redis or Memcached for caching\?/) // idle Claude, no channel: a prompt catches it up
   const claudeWaiting = stop('claude', 'Redis, it has persistence. [DONE]')
   assert.match((await codexWaiting).reason, /New message via codex-bridge:\n\n\[claude\] Redis, it has persistence\. \[DONE\]/)
+  assert.ok(!existsSync(join(BDIR, 'codex.waiting')))
   assert.equal(await claudeWaiting, null) // conversation over
   assert.equal(await stop('codex', 'Thanks.'), null) // over: not logged
   assert.ok(!chat().includes('Thanks.'))
@@ -75,7 +104,7 @@ test('prompt context: only when the other agent is mentioned or the bridge is op
   const ctx = await prompt('codex', 'Discuss caching with claude bridge')
   assert.match(ctx, /Claude Bridge: .*start your reply with @claude/)
   assert.match(ctx, /Do not use the `claude` CLI or any MCP tool/)
-  assert.ok(!existsSync(BDIR)) // context alone does not open anything
+  assert.ok(!existsSync(CHAT)) // context alone does not open anything
   const codexWaiting = openWith('codex', 'Q')
   await sleep(300)
   assert.match(await prompt('claude', 'anything'), /start your reply with @codex/) // open: context regardless of wording
@@ -211,6 +240,124 @@ test('Claude Stop hook that opens the bridge returns once the channel claims the
   assert.ok(Date.now() - t0 < 2500, 'returned as soon as the channel appeared')
   assert.match(chat(), /## claude @ [^\n]+\nRedis or Memcached\?/)
   reset()
+})
+
+test('Claude wakes idle Codex with the saved configured thread and a short queue message', async () => {
+  readyToWake()
+  const thread = '01a11151-0f06-70b1-949b-f1a3be4513b2'
+  await prompt('codex', 'go', 'codex-1', { CODEX_BRIDGE_THREAD: thread })
+  assert.equal(JSON.parse(readFileSync(join(BDIR, 'codex.json'), 'utf8')).thread, thread)
+  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.deepEqual(wakeCalls(), [['queue', '--thread', thread, '--message', 'New message available.']])
+})
+
+test('opening a new bridge keeps the Codex thread learned before chat exists', async () => {
+  reset()
+  rmSync(WAKE_LOG, { force: true })
+  const thread = 'configured-before-chat'
+  await prompt('codex', 'ordinary prompt', 'codex-1', { CODEX_BRIDGE_THREAD: thread })
+  assert.ok(!existsSync(CHAT))
+  writeFileSync(join(BDIR, 'claude.channel'), String(process.pid))
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, wakeEnv), null)
+  assert.deepEqual(wakeCalls(), [['queue', '--thread', thread, '--message', 'New message available.']])
+})
+
+test('Claude does not queue while the Codex Stop hook is waiting', async () => {
+  readyToWake()
+  await prompt('codex', 'go', 'codex-1', { CODEX_BRIDGE_THREAD: 'codex-thread' })
+  writeFileSync(join(BDIR, 'codex.waiting'), String(process.pid))
+  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.deepEqual(wakeCalls(), [])
+})
+
+test('a stale waiting marker does not prevent the wake', async () => {
+  readyToWake()
+  await prompt('codex', 'go', 'codex-1', { CODEX_BRIDGE_THREAD: 'codex-thread' })
+  writeFileSync(join(BDIR, 'codex.waiting'), '999999999')
+  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.equal(wakeCalls().length, 1)
+})
+
+test('without a Codex thread Claude does not queue or crash', async () => {
+  readyToWake()
+  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.deepEqual(wakeCalls(), [])
+})
+
+test('CODEX_BRIDGE_THREAD supplies the thread when the hook payload has no ID', async () => {
+  readyToWake()
+  const thread = 'configured-thread'
+  assert.equal(await stop('claude', 'A', 'claude-1', {}, { ...wakeEnv, CODEX_BRIDGE_THREAD: thread }), null)
+  assert.deepEqual(wakeCalls(), [['queue', '--thread', thread, '--message', 'New message available.']])
+})
+
+test('hook session_id is saved for waking Codex when no configured thread exists', async () => {
+  readyToWake()
+  await run(['hook', 'codex'], JSON.stringify({ hook_event_name: 'UserPromptSubmit', cwd: DIR, session_id: 'hook-session', thread_id: 'hook-thread', prompt: 'go' }))
+  assert.equal(JSON.parse(readFileSync(join(BDIR, 'codex.json'), 'utf8')).thread, 'hook-session')
+  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.deepEqual(wakeCalls(), [['queue', '--thread', 'hook-session', '--message', 'New message available.']])
+})
+
+test('configured thread takes priority over the ID saved from a Codex hook', async () => {
+  readyToWake()
+  await run(['hook', 'codex'], JSON.stringify({ hook_event_name: 'UserPromptSubmit', cwd: DIR, session_id: 'hook-session', prompt: 'go' }))
+  assert.equal(await stop('claude', 'A', 'claude-1', {}, { ...wakeEnv, CODEX_BRIDGE_THREAD: 'configured-thread' }), null)
+  assert.deepEqual(wakeCalls(), [['queue', '--thread', 'configured-thread', '--message', 'New message available.']])
+})
+
+test('discovery picks the newest codex-tui rollout in the bridge cwd', async () => {
+  readyToWake()
+  const now = Date.now()
+  rollout('older-good', { originator: 'codex-tui', cwd: DIR, id: 'older-good' }, new Date(now - 4000))
+  rollout('newer-good', { originator: 'codex-tui', cwd: DIR, id: 'newer-good' }, new Date(now - 3000))
+  rollout('exec', { originator: 'codex_exec', cwd: DIR, id: 'exec' }, new Date(now - 2000))
+  rollout('other-cwd', { originator: 'codex-tui', cwd: '/somewhere-else', id: 'other-cwd' }, new Date(now - 1000))
+  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.deepEqual(wakeCalls(), [['queue', '--thread', 'newer-good', '--message', 'New message available.']])
+})
+
+test('discovery searches only three days and twenty newest rollouts', async () => {
+  readyToWake()
+  const now = Date.now()
+  rollout('old-day', { originator: 'codex-tui', cwd: DIR, id: 'old-day' }, new Date(now), 3)
+  rollout('twenty-first', { originator: 'codex-tui', cwd: DIR, id: 'twenty-first' }, new Date(now - 30_000))
+  for (let i = 0; i < 20; i++) rollout(`exec-${i}`, { originator: 'codex_exec', cwd: DIR, id: `exec-${i}` }, new Date(now - i * 1000))
+  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.deepEqual(wakeCalls(), [])
+})
+
+test('debug file captures hook input and environment names for each side', async () => {
+  reset()
+  mkdirSync(BDIR, { recursive: true })
+  writeFileSync(join(BDIR, 'debug'), '')
+  const claudeInput = '{ "hook_event_name": "UserPromptSubmit", "cwd": ' + JSON.stringify(DIR) + ', "prompt": "go" }'
+  const codexInput = '{ "hook_event_name": "UserPromptSubmit", "cwd": ' + JSON.stringify(DIR) + ', "prompt": "go", "session_id": "id" }'
+  for (const [side, input] of [['claude', claudeInput], ['codex', codexInput]]) {
+    await run(['hook', side], input, { OTHER_SECRET_MARKER: 'never-write-this-value' })
+    const raw = readFileSync(join(BDIR, `debug-${side}.json`), 'utf8')
+    const debug = JSON.parse(raw)
+    assert.equal(debug.input, input)
+    assert.equal(debug.cwd, DIR)
+    assert.ok(Number.isInteger(debug.ppid) && debug.ppid > 0)
+    assert.ok(debug.envKeys.includes('OTHER_SECRET_MARKER'))
+    assert.ok(!('CODEX_BRIDGE_DEBUG' in debug.bridgeEnv))
+    assert.equal(debug.bridgeEnv.CODEX_BRIDGE_WAIT_MS, '3000')
+    assert.ok(!raw.includes('never-write-this-value'))
+  }
+})
+
+test('debug environment variable and home fallback each enable capture', async () => {
+  reset()
+  const input = JSON.stringify({ hook_event_name: 'UserPromptSubmit', cwd: DIR, prompt: 'go' })
+  await run(['hook', 'claude'], input, { CODEX_BRIDGE_DEBUG: '' })
+  assert.equal(JSON.parse(readFileSync(join(BDIR, 'debug-claude.json'), 'utf8')).bridgeEnv.CODEX_BRIDGE_DEBUG, '')
+  reset()
+  const home = join(DIR, 'home')
+  mkdirSync(join(home, '.codex-bridge'), { recursive: true })
+  writeFileSync(join(home, '.codex-bridge', 'debug'), '')
+  await run(['hook', 'codex'], input, { HOME: home })
+  assert.equal(JSON.parse(readFileSync(join(BDIR, 'debug-codex.json'), 'utf8')).input, input)
 })
 
 test('channel: MCP handshake, then pushes new Codex blocks as notifications and advances seen', async () => {
