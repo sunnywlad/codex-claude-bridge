@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -456,6 +457,23 @@ test('a replaced named member cannot add messages to the old bridge', async () =
   await prompt('codex', 'discuss with claude bridge alpha: new', 'codex-new')
   assert.equal(await stop('codex', '@claude alpha: stale', 'codex-old'), null)
   assert.ok(!existsSync(join(BDIR, 'alpha', 'chat.md')))
+})
+
+test('a Claude session binds to a named bridge only after explicitly joining it', async () => {
+  reset()
+  const id = 'claude-beta-session'
+  await stop('claude', '@codex initial default message', id, {}, { CODEX_BRIDGE_WAIT_MS: '0' })
+  assert.match(readFileSync(CHAT, 'utf8'), /initial default message/)
+
+  await prompt('claude', 'discuss with codex bridge beta: join', id)
+  const key = createHash('sha256').update(id).digest('hex')
+  const session = JSON.parse(readFileSync(join(BDIR, 'sessions', `claude-${key}.json`), 'utf8'))
+  assert.equal(session.name, 'beta')
+  assert.equal(JSON.parse(readFileSync(join(BDIR, 'beta', 'claude.member.json'), 'utf8')).id, id)
+
+  await stop('claude', '@codex beta: named message', id, {}, { CODEX_BRIDGE_WAIT_MS: '0' })
+  assert.match(readFileSync(join(BDIR, 'beta', 'chat.md'), 'utf8'), /named message/)
+  assert.doesNotMatch(readFileSync(CHAT, 'utf8'), /named message/)
 })
 
 test('two named Claude channels deliver only their own chat', async () => {
