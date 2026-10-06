@@ -163,7 +163,7 @@ Set aside on purpose, may come back:
 - **Relay as a systemd service.** The `relay` command and a user unit exist but the service is not installed or tested. The relay only runs from a normal terminal, because `codex queue` fails inside the Codex sandbox (`~/.codex` is read-only there).
 - **Codex to Codex.** No direct path. It would need `codex queue` from a sandbox that cannot write `~/.codex`, or a shared file read at the next turn. Today everything goes through the Claude orchestrator.
 - **Several Codex workers as chat members.** A chat has one Claude member and one Codex member. Extra workers are not members; they report with `say`.
-- **Session identity.** `/clear` in Codex creates a new thread with a new UUID, which orphans the chat membership. Address sessions by name instead; the rename command inside the Codex TUI is not verified.
+- **Session identity.** `/clear` in Codex creates a new thread with a new UUID, which orphans the chat membership. Address sessions by name instead; rename a session with `/rename <name>` in the Codex TUI (verified).
 - **At-least-once delivery.** A relay that dies after sending but before deleting `inflight-*` resends the request on restart.
 - **Silent channel switch.** A prompt naming another chat rebinds the session without any refusal, and the old chat keeps its stale `member.json`.
 
