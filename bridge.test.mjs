@@ -126,6 +126,7 @@ test('prompt context: an open bridge adds instructions only when the prompt name
   const plain = await prompt('claude', 'anything')
   assert.doesNotMatch(plain ?? '', /Claude Bridge:/)
   assert.match(await prompt('claude', 'please use codex bridge alpha:'), /Codex Bridge: .*start your reply with @codex alpha:/i)
+  assert.match(await prompt('codex', 'please use claude bridge alpha:'), /does not carry Codex-to-Codex messages.*codex queue --thread/i)
   reset()
   await codexWaiting
 })

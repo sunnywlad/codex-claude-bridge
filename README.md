@@ -50,6 +50,26 @@ In the matching Claude pane, say `discuss with codex bridge alpha: ...` once to 
 
 From the Claude pane, start with `discuss with codex bridge alpha: ...`. Codex must have joined `alpha` once; the bridge then wakes its saved session through `codex queue`. Use `beta` for a second pair. Without a name, `discuss with codex bridge: ...` keeps the original behavior.
 
+### Codex to Codex
+
+Codex sessions do not exchange messages through the Claude bridge. Send directly to a named Codex session with `codex queue`:
+
+```bash
+codex queue --thread corpus --message "Bonjour corpus, ici gamma. Est-ce que tu me reçois ?"
+```
+
+The target may be an exact session name or UUID. To send the reply back, the other session runs `codex queue` with this session's name or UUID as `--thread`.
+
+`codex queue` writes to `~/.codex`. In the default `workspace-write` sandbox, that path is protected and the command can fail with `unable to open database file`. Keep `workspace-write`, and configure Approve for me so an eligible request can be approved automatically:
+
+```toml
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+sandbox_mode = "workspace-write"
+```
+
+Restart both sessions after changing `~/.codex/config.toml`. This keeps the sandbox boundary; it does not grant full access.
+
 Watch the transcript from anywhere:
 
 ```bash
@@ -161,7 +181,7 @@ What works, verified: Claude to Codex through `codex queue --thread <session nam
 Set aside on purpose, may come back:
 
 - **Relay as a systemd service.** The `relay` command and a user unit exist but the service is not installed or tested. The relay only runs from a normal terminal, because `codex queue` fails inside the Codex sandbox (`~/.codex` is read-only there).
-- **Codex to Codex.** No direct path. It would need `codex queue` from a sandbox that cannot write `~/.codex`, or a shared file read at the next turn. Today everything goes through the Claude orchestrator.
+- **Codex to Codex.** Direct delivery is verified with `codex queue --thread <session name or UUID> --message "..."`. Each sender must be able to obtain an approved elevation for the command because `codex queue` writes to `~/.codex`; `workspace-write` alone protects that path. This path does not use the Claude bridge transcript.
 - **Several Codex workers as chat members.** A chat has one Claude member and one Codex member. Extra workers are not members; they report with `say`.
 - **Session identity.** `/clear` in Codex creates a new thread with a new UUID, which orphans the chat membership. Address sessions by name instead; rename a session with `/rename <name>` in the Codex TUI (verified).
 - **At-least-once delivery.** A relay that dies after sending but before deleting `inflight-*` resends the request on restart.

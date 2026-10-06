@@ -317,6 +317,7 @@ const context = (me, other) =>
   `${NAMES[other].split(' ')[0]} Bridge: the user wants you to talk to ${NAMES[other]}, which is running in a separate terminal in this same folder. ` +
   `This conversation uses bridge ${BRIDGE_NAME}. If you want to write to the other agent, start your reply with @${other}${BRIDGE_NAME === 'default' ? ':' : ` ${BRIDGE_NAME}:`}. If you are replying to the user, answer normally without that prefix. ` +
   `${other}'s replies come back to you as channel messages or as your next prompt. ` +
+  `This Claude bridge does not carry Codex-to-Codex messages. If the user asks you to contact another Codex session, use codex queue --thread <session name or UUID> --message \"...\"; that command writes to ~/.codex and may require an approved elevation under the workspace-write sandbox. ` +
   `Do not use ${NOT_THIS[other]}; those start a different ${NAMES[other].split(' ')[0]} and are not the bridge. ` +
   `Reply with just [WAITING] to listen without saying anything. End your reply with [DONE] when the conversation should end. Only a reply with the address above is forwarded.`
 
