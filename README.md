@@ -56,6 +56,12 @@ Watch the transcript from anywhere:
 tail -f .codex-bridge/alpha/chat.md
 ```
 
+To send a note into one open named chat from the terminal:
+
+```bash
+node bridge.mjs say --bridge alpha "Please check the latest result"
+```
+
 ## How it works
 
 `bridge.mjs` does three jobs. Each named bridge has its own chat and state files:

@@ -425,6 +425,17 @@ test('an addressed WAITING reply after DONE preserves the named transcript', asy
   assert.equal(readFileSync(file, 'utf8'), before)
 })
 
+test('say can address one named bridge without touching another', async () => {
+  reset()
+  for (const name of ['alpha', 'beta']) {
+    mkdirSync(join(BDIR, name), { recursive: true })
+    writeFileSync(join(BDIR, name, 'chat.md'), '')
+  }
+  assert.equal(await run(['say', '--bridge', 'alpha', 'test message']), '')
+  assert.match(readFileSync(join(BDIR, 'alpha', 'chat.md'), 'utf8'), /test message/)
+  assert.equal(readFileSync(join(BDIR, 'beta', 'chat.md'), 'utf8'), '')
+})
+
 test('a replaced named member cannot add messages to the old bridge', async () => {
   reset()
   await prompt('codex', 'discuss with claude bridge alpha: old', 'codex-old')

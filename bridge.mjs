@@ -429,14 +429,21 @@ switch (cmd) {
     channel(rest[0])
     break
   case 'say':
-    setDir(process.cwd())
+    if (rest[0] === '--bridge') {
+      if (!validName(rest[1])) {
+        console.error('usage: bridge.mjs say --bridge <name> <text>')
+        process.exit(1)
+      }
+      setDir(process.cwd(), rest[1])
+      rest.splice(0, 2)
+    } else setDir(process.cwd())
     if (!existsSync(CHAT) || !rest.join(' ').trim()) {
-      console.error('usage: bridge.mjs say <text>   (no open bridge in this folder)')
+      console.error('usage: bridge.mjs say [--bridge <name>] <text>   (no open bridge in this folder)')
       process.exit(1)
     }
     append('user', rest.join(' '))
     break
   default:
-    console.error('usage: bridge.mjs hook [claude|codex]  |  bridge.mjs channel  |  bridge.mjs say <text>')
+    console.error('usage: bridge.mjs hook [claude|codex]  |  bridge.mjs channel  |  bridge.mjs say [--bridge <name>] <text>')
     process.exit(1)
 }
