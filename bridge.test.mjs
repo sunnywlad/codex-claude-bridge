@@ -105,16 +105,18 @@ test('a new @-addressed reply after [DONE] starts a fresh conversation', async (
   await claudeWaiting
 })
 
-test('prompt context: only when the other agent is mentioned or the bridge is open', async () => {
+test('prompt context: an open bridge adds instructions only when the prompt names it', async () => {
   reset()
   assert.equal(await prompt('codex', 'refactor the parser with claude'), null) // bare name is not a trigger
   const ctx = await prompt('codex', 'Discuss caching with claude bridge')
-  assert.match(ctx, /Claude Bridge: .*start your reply with @claude/)
+  assert.match(ctx, /Claude Bridge: .*start your reply with @claude/i)
   assert.match(ctx, /Do not use the `claude` CLI or any MCP tool/)
   assert.ok(!existsSync(CHAT)) // context alone does not open anything
   const codexWaiting = openWith('codex', 'Q')
   await sleep(300)
-  assert.match(await prompt('claude', 'anything'), /start your reply with @codex/) // open: context regardless of wording
+  const plain = await prompt('claude', 'anything')
+  assert.doesNotMatch(plain ?? '', /Claude Bridge:/)
+  assert.match(await prompt('claude', 'please use codex bridge alpha:'), /Codex Bridge: .*start your reply with @codex alpha:/i)
   reset()
   await codexWaiting
 })

@@ -300,7 +300,9 @@ function promptHook(me, other, input) {
       extra = `\n\nUnread from the bridge:\n\n${fresh.map(fmt).join('\n\n')}`
     }
   }
-  console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context(me, other) + extra } }))
+  const instructions = mentions ? context(me, other) : ''
+  if (!instructions && !extra) return
+  console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: instructions + extra } }))
 }
 
 async function hook(arg) {
