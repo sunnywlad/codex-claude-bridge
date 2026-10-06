@@ -62,6 +62,14 @@ To send a note into one open named chat from the terminal:
 node bridge.mjs say --bridge alpha "Please check the latest result"
 ```
 
+To give an idle Codex session a task from a sandbox that cannot run `codex queue`, use:
+
+```bash
+node bridge.mjs send --bridge alpha "Audit the report and reply briefly"
+```
+
+The matching Claude channel relays this request to `codex queue` without asking the Claude model to act. Pending requests remain as `queue-*.json` until the relay succeeds. Restart Claude Code after updating the bridge so its long-running channel loads this behavior.
+
 ## How it works
 
 `bridge.mjs` does three jobs. Each named bridge has its own chat and state files:

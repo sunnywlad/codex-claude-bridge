@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -483,6 +483,19 @@ test('Claude membership keeps the stable CLI PID across prompt and Stop hooks', 
   assert.equal(JSON.parse(readFileSync(memberFile, 'utf8')).pid, 424242)
   assert.equal(await stop('claude', 'Unrelated status.', 'claude-alpha', {}, { HOME: home }), null)
   assert.equal(JSON.parse(readFileSync(memberFile, 'utf8')).pid, 424242)
+})
+
+test('named queue request targets one idle Codex session through the relay', async () => {
+  reset()
+  rmSync(WAKE_LOG, { force: true })
+  await prompt('codex', 'discuss with claude bridge alpha: test', 'codex-alpha')
+  await prompt('claude', 'discuss with codex bridge alpha: test', 'claude-alpha')
+  writeFileSync(join(BDIR, 'alpha', 'chat.md'), '')
+  assert.equal(await run(['send', '--bridge', 'alpha', 'Audit the report']), '')
+  assert.equal(wakeCalls().length, 0)
+  assert.equal(await run(['drain', '--bridge', 'alpha'], '', wakeEnv), '')
+  assert.deepEqual(wakeCalls(), [['queue', '--thread', 'codex-alpha', '--message', 'Audit the report']])
+  assert.deepEqual(readdirSync(join(BDIR, 'alpha')).filter(name => name.startsWith('queue-')), [])
 })
 
 test('channel: MCP handshake, then pushes new Codex blocks as notifications and advances seen', async () => {

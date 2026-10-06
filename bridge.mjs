@@ -21,11 +21,12 @@
  *
  * Per-side state in ./.codex-bridge/<side>.json: how many blocks that side has seen.
  */
-import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { execFile, execFileSync } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { promisify } from 'node:util'
 
 const VERSION = '0.2.0'
 const WAIT_MS = Number(process.env.CODEX_BRIDGE_WAIT_MS ?? 570_000) // stay under the 600s hook timeout
@@ -33,6 +34,7 @@ const MAX_MSGS = 40
 const MARK = /^## (claude|codex|user|bridge) @ \d{4}-\d\d-\d\dT[\d:.]+Z$/
 const SIDES = ['claude', 'codex']
 const NAMES = { claude: 'Claude Code', codex: 'Codex CLI' }
+const execFileAsync = promisify(execFile)
 
 let ROOT, DIR, CHAT, MARKER, WAITING, BRIDGE_NAME
 function setDir(cwd, name = 'default') {
@@ -182,6 +184,32 @@ function wakeCodex() {
     execFileSync(process.env.CODEX_BRIDGE_CODEX_BIN || 'codex',
       ['queue', '--thread', thread, '--message', 'New message available.'], { timeout: 30_000 })
   } catch {} // a failed wake must not break Claude's hook
+}
+
+function sendToCodex(message) {
+  if (!existsSync(CHAT)) throw new Error(`bridge ${BRIDGE_NAME} is not open`)
+  const thread = JSON.parse(readFileSync(stateFile('codex'), 'utf8')).thread
+  if (typeof thread !== 'string' || !thread.trim()) throw new Error(`bridge ${BRIDGE_NAME} has no Codex session`)
+  if (codexWaiting()) append('user', message)
+  else writeFileSync(join(DIR, `queue-${randomUUID()}.json`), JSON.stringify({ thread, message }))
+}
+
+async function drainQueue() {
+  for (const file of readdirSync(DIR).filter(name => /^queue-[0-9a-f-]+\.json$/.test(name))) {
+    try {
+      const path = join(DIR, file)
+      const { thread, message } = JSON.parse(readFileSync(path, 'utf8'))
+      const current = JSON.parse(readFileSync(stateFile('codex'), 'utf8')).thread
+      if (thread !== current) { rmSync(path); continue }
+      await execFileAsync(process.env.CODEX_BRIDGE_CODEX_BIN || 'codex',
+        ['queue', '--thread', thread, '--message', message], { timeout: 30_000 })
+      rmSync(path)
+    } catch (err) {
+      console.error(`codex-bridge queue: ${err.message}`)
+      return false
+    }
+  }
+  return true
 }
 
 function changed() {
@@ -354,6 +382,8 @@ function channel(sessionId) {
   setDir(process.cwd())
   const me = 'claude'
   const owned = new Set()
+  let nextQueueAttempt = 0
+  let draining = false
   const selectBridge = () => {
     setDir(process.cwd())
     if (sessionId) {
@@ -414,6 +444,10 @@ function channel(sessionId) {
     if (!channelAlive()) writeFileSync(MARKER, String(process.pid))     // claim delivery for this folder
     if (Number(readFileSync(MARKER, 'utf8')) !== process.pid) return    // another Claude session's channel owns it
     owned.add(MARKER)
+    if (!draining && Date.now() >= nextQueueAttempt) {
+      draining = true
+      void drainQueue().then(ok => { if (!ok) nextQueueAttempt = Date.now() + 5000 }).finally(() => { draining = false })
+    }
     let all
     try { all = parse() } catch { return }
     if (!all) return
@@ -455,7 +489,24 @@ switch (cmd) {
     }
     append('user', rest.join(' '))
     break
+  case 'send':
+    if (rest[0] !== '--bridge' || !validName(rest[1]) || !rest.slice(2).join(' ').trim()) {
+      console.error('usage: bridge.mjs send --bridge <name> <message>')
+      process.exit(1)
+    }
+    setDir(process.cwd(), rest[1])
+    try { sendToCodex(rest.slice(2).join(' ')) }
+    catch (err) { console.error(err.message); process.exit(1) }
+    break
+  case 'drain':
+    if (rest[0] !== '--bridge' || !validName(rest[1])) {
+      console.error('usage: bridge.mjs drain --bridge <name>')
+      process.exit(1)
+    }
+    setDir(process.cwd(), rest[1])
+    if (!await drainQueue()) process.exit(1)
+    break
   default:
-    console.error('usage: bridge.mjs hook [claude|codex]  |  bridge.mjs channel  |  bridge.mjs say [--bridge <name>] <text>')
+    console.error('usage: bridge.mjs hook [claude|codex]  |  bridge.mjs channel  |  bridge.mjs say [--bridge <name>] <text>  |  bridge.mjs send --bridge <name> <message>')
     process.exit(1)
 }
