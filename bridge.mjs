@@ -14,8 +14,8 @@
  *   ## codex @ 2026-09-08T10:15:02.113Z
  *   text...
  *
- * A reply that starts with @claude or @codex opens the default bridge. Named bridges use
- * @claude <name>: or @codex <name>:. A direct reply to an incoming bridge message is also forwarded.
+ * A reply addressed with @claude or @codex opens the default bridge. Named bridges use
+ * @claude <name>: or @codex <name>:. Only explicitly addressed replies are forwarded.
  * The other side gets it either through the channel (Claude, when Claude Code runs
  * with the channel enabled) or by its own Stop hook waiting on the file and returning
  * {"decision":"block","reason":...}, which becomes its next prompt. [WAITING] at the start or end of
@@ -29,6 +29,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
+import { channelResponse } from './channel-protocol.mjs'
 
 const VERSION = '0.2.0'
 const WAIT_MS = Number(process.env.CODEX_BRIDGE_WAIT_MS ?? 570_000) // stay under the 600s hook timeout
@@ -314,10 +315,10 @@ const NOT_THIS = {
 }
 const context = (me, other) =>
   `${NAMES[other].split(' ')[0]} Bridge: the user wants you to talk to ${NAMES[other]}, which is running in a separate terminal in this same folder. ` +
-  `This conversation uses bridge ${BRIDGE_NAME}. Start your reply with @${other}${BRIDGE_NAME === 'default' ? '' : ` ${BRIDGE_NAME}:`}. Your reply is delivered to ${other} by a hook, ` +
-  `and ${other}'s replies come back to you as channel messages or as your next prompt. ` +
+  `This conversation uses bridge ${BRIDGE_NAME}. If you want to write to the other agent, start your reply with @${other}${BRIDGE_NAME === 'default' ? ':' : ` ${BRIDGE_NAME}:`}. If you are replying to the user, answer normally without that prefix. ` +
+  `${other}'s replies come back to you as channel messages or as your next prompt. ` +
   `Do not use ${NOT_THIS[other]}; those start a different ${NAMES[other].split(' ')[0]} and are not the bridge. ` +
-  `Reply with just [WAITING] to listen without saying anything. End your reply with [DONE] when the conversation should end. Only an addressed reply or a reply to a bridge message is forwarded.`
+  `Reply with just [WAITING] to listen without saying anything. End your reply with [DONE] when the conversation should end. Only a reply with the address above is forwarded.`
 
 function bind(me, all) { // every session in this folder takes part; hooks are configured per folder
   const state = loadState(me, all[0]?.head ?? '')
@@ -336,12 +337,13 @@ function promptHook(me, other, input) {
     const fresh = all.slice(state.seen).filter(b => b.from !== me)
     if (fresh.length && !(me === 'claude' && channelAlive())) { // the channel delivers for Claude; otherwise hand over what is waiting
       state.seen = all.length
-      state.pending = true
       saveState(me, state)
       extra = `\n\nUnread from the bridge:\n\n${fresh.map(fmt).join('\n\n')}`
     }
   }
-  console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context(me, other) + extra } }))
+  const instructions = mentions ? context(me, other) : ''
+  if (!instructions && !extra) return
+  console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: instructions + extra } }))
 }
 
 async function hook(arg) {
@@ -393,17 +395,16 @@ async function hook(arg) {
   const state = bind(me, all)
   const unread = () => all.slice(state.seen).filter(b => b.from !== me)
   if (done(all) && !unread().length) return // conversation over: later chatter is not logged
-  const forwarding = addressed || state.pending
+  const forwarding = addressed || listening
   if (!forwarding && !unread().length) return
   if (mine && forwarding && !listening) {
     append(me, mine)
-    state.pending = false
     saveState(me, state)
     if (me === 'claude') wakeCodex()
   }
-  if (me === 'claude') for (let i = 0; i < 4; i++) { // the channel claims a fresh bridge within one tick: give it a moment
+  if (me === 'claude') for (let i = 0; i < 80; i++) { // give a newly starting channel up to 2s to claim this bridge
     if (channelAlive()) return // the channel wakes Claude; no need to hold the terminal
-    await new Promise(r => setTimeout(r, 500))
+    await new Promise(r => setTimeout(r, 25))
   }
 
   const deadline = Date.now() + WAIT_MS
@@ -416,11 +417,10 @@ async function hook(arg) {
       const fresh = unread()
       if (fresh.length) {
         state.seen = all.length
-        state.pending = true
         saveState(me, state)
         const reason =
           `New message${fresh.length > 1 ? 's' : ''} via codex-bridge:\n\n${fresh.map(fmt).join('\n\n')}` +
-          `\n\n(Reply as usual; your reply is delivered to ${other} automatically. End your message with [DONE] when the conversation should end.)`
+          `\n\n(If you want to write to ${other}, start your reply with @${other}${name === 'default' ? ':' : ` ${name}:`}. Otherwise answer the user normally. End your message with [DONE] when the conversation should end.)`
         console.log(JSON.stringify({ decision: 'block', reason }))
         return
       }
@@ -458,7 +458,7 @@ function channelRegistered() {
 }
 
 /** Claude Code channel: a one-way MCP server over stdio that pushes new blocks from the other side into the session. */
-function channel(sessionId) {
+function channel(sessionId = process.env.CLAUDE_CODE_SESSION_ID) {
   setDir(process.cwd())
   const me = 'claude'
   const owned = new Set()
@@ -494,21 +494,11 @@ function channel(sessionId) {
       buf = buf.slice(i + 1)
       let msg
       try { msg = JSON.parse(line) } catch { continue }
-      if (msg.id === undefined) continue // a notification from the client; nothing to answer
-      if (msg.method === 'initialize') write({ id: msg.id, result: {
-        protocolVersion: msg.params?.protocolVersion ?? '2025-06-18',
-        capabilities: { experimental: { 'claude/channel': {} } },
-        serverInfo: { name: 'codex-bridge', version: VERSION },
-        instructions: `Messages from Codex CLI, running in this folder, arrive as <channel source="codex-bridge" sender="codex">. ` +
-          `Reply with normal text: your final reply is delivered to Codex automatically by the codex-bridge Stop hook. ` +
-          `Never call a tool to send it. End your reply with [DONE] when the conversation should end.`,
-      } })
-      else if (msg.method === 'ping') write({ id: msg.id, result: {} })
-      else if (msg.method === 'tools/list') write({ id: msg.id, result: { tools: [] } })
-      else write({ id: msg.id, error: { code: -32601, message: `unknown method ${msg.method}` } })
+      const response = channelResponse(msg, VERSION)
+      if (response) write(response)
     }
   })
-  process.stdin.on('end', () => process.exit(0))
+  process.stdin.on('end', () => process.stdout.end(() => process.exit(0)))
 
   if (!channelRegistered()) return // not enabled for this session: the Stop hook keeps delivering by waiting
   const tick = () => {
@@ -529,7 +519,6 @@ function channel(sessionId) {
     const fresh = all.slice(state.seen).filter(b => b.from !== me)
     if (!fresh.length) return
     state.seen = all.length
-    state.pending = true
     saveState(me, state)
     for (const b of fresh) write({ method: 'notifications/claude/channel', params: {
       content: b.text,
