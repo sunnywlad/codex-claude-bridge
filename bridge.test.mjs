@@ -11,11 +11,16 @@ const DIR = mkdtempSync(join(tmpdir(), 'codex-bridge-'))
 const BDIR = join(DIR, '.codex-bridge')
 const CHAT = join(BDIR, 'chat.md')
 const BRIDGE = new URL('./bridge.mjs', import.meta.url).pathname
+const ISOLATED_BIN = join(DIR, 'isolated-bin')
 const FAKE_CODEX = join(DIR, 'fake-codex')
 const WAKE_LOG = join(DIR, 'wake-log')
 const SESSION_ROOT = join(DIR, 'sessions')
 writeFileSync(FAKE_CODEX, '#!/usr/bin/env node\nrequire("node:fs").appendFileSync(process.env.CODEX_BRIDGE_WAKE_LOG, JSON.stringify(process.argv.slice(2)) + "\\n")\n')
 chmodSync(FAKE_CODEX, 0o755)
+mkdirSync(ISOLATED_BIN)
+const FAKE_PS = join(ISOLATED_BIN, 'ps')
+writeFileSync(FAKE_PS, "#!/bin/sh\nprintf '1 isolated-parent\\n'\n")
+chmodSync(FAKE_PS, 0o755)
 const env = { ...process.env, CODEX_BRIDGE_WAIT_MS: '3000', CODEX_BRIDGE_SESSIONS: SESSION_ROOT }
 delete env.PLUGIN_DATA
 delete env.CODEX_BRIDGE_CHANNEL
@@ -630,7 +635,11 @@ test('channel: MCP initialize response and Codex block notifications', async () 
 test('channel: stays silent when Claude Code was not started with the channel enabled', async () => {
   reset()
   mkdirSync(BDIR, { recursive: true }); writeFileSync(CHAT, '')
-  const p = spawn(process.execPath, [BRIDGE, 'channel'], { cwd: DIR, env, stdio: ['pipe', 'pipe', 'inherit'] })
+  const channelEnv = { ...env, HOME: join(DIR, 'isolated-home'), PATH: ISOLATED_BIN }
+  mkdirSync(channelEnv.HOME, { recursive: true })
+  delete channelEnv.CLAUDE_CODE_SESSION_ID
+  delete channelEnv.CODEX_BRIDGE_CHANNEL
+  const p = spawn(process.execPath, [BRIDGE, 'channel'], { cwd: DIR, env: channelEnv, stdio: ['pipe', 'pipe', 'inherit'] })
   let out = ''
   p.stdout.on('data', d => { out += d })
   await run(['say', 'hello'])
