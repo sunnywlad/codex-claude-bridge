@@ -82,6 +82,27 @@ test('relay --once drains queues for every named bridge, including later bridges
   assert.equal(readdirSync(beta).filter(name => name.startsWith('queue-')).length, 0, 'successful queue items are removed')
 })
 
+test('stale thread requests move to failed, warn in chat, and do not block the next request', t => {
+  const f = fixture(t)
+  const staleId = '11111111-1111-4111-8111-111111111111'
+  const liveId = '22222222-2222-4222-8222-222222222222'
+  const dir = f.bridge('alpha', 'thread-current', [
+    [staleId, 'old task', 'thread-old'],
+    [liveId, 'current task', 'thread-current'],
+  ])
+
+  const result = f.run('relay', '--once', '--project', f.project)
+
+  assert.equal(result.status, 0, result.stderr)
+  const failedName = `${staleId}.json`
+  const failed = JSON.parse(readFileSync(join(dir, 'failed', failedName), 'utf8'))
+  assert.equal(failed.thread, 'thread-old')
+  assert.match(failed.reason, /target thread thread-old is stale; current thread is thread-current/)
+  assert.match(readFileSync(join(dir, 'chat.md'), 'utf8'), new RegExp(`request ${failedName} failed:.*failed/${failedName}`))
+  assert.deepEqual(f.calls(), [['queue', '--thread', 'thread-current', '--message', 'current task']])
+  assert.deepEqual(readdirSync(dir).filter(name => name.startsWith('queue-') || name.startsWith('inflight-')), [])
+})
+
 test('clear --bridge resets chat and side states while preserving thread, member files, and queued messages', t => {
   const f = fixture(t)
   const dir = f.bridge('alpha', 'thread-keep', [['pending', 'keep me']])

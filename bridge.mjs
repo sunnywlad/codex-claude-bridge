@@ -216,9 +216,20 @@ async function drainQueue() {
       return false
     }
     try {
-      const { thread, message } = JSON.parse(readFileSync(claimed, 'utf8'))
+      const request = JSON.parse(readFileSync(claimed, 'utf8'))
+      const { thread, message } = request
       const current = JSON.parse(readFileSync(stateFile('codex'), 'utf8')).thread
-      if (thread !== current) { rmSync(claimed); continue }
+      if (thread !== current) {
+        const reason = `target thread ${thread} is stale; current thread is ${current}`
+        const failedDir = join(DIR, 'failed')
+        mkdirSync(failedDir, { recursive: true })
+        const failedName = file.replace(/^queue-/, '')
+        writeFileSync(join(failedDir, failedName), JSON.stringify({ ...request, failedAt: new Date().toISOString(), reason }))
+        rmSync(claimed)
+        if (!existsSync(CHAT)) writeFileSync(CHAT, '')
+        append('bridge', `Queued Codex request ${failedName} failed: ${reason}. Details: failed/${failedName}`)
+        continue
+      }
       await execFileAsync(process.env.CODEX_BRIDGE_CODEX_BIN || 'codex',
         ['queue', '--thread', thread, '--message', message], { timeout: 30_000 })
       rmSync(claimed)
