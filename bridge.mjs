@@ -29,6 +29,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
+import { channelResponse } from './channel-protocol.mjs'
 
 const VERSION = '0.2.0'
 const WAIT_MS = Number(process.env.CODEX_BRIDGE_WAIT_MS ?? 570_000) // stay under the 600s hook timeout
@@ -455,21 +456,11 @@ function channel(sessionId = process.env.CLAUDE_CODE_SESSION_ID) {
       buf = buf.slice(i + 1)
       let msg
       try { msg = JSON.parse(line) } catch { continue }
-      if (msg.id === undefined) continue // a notification from the client; nothing to answer
-      if (msg.method === 'initialize') write({ id: msg.id, result: {
-        protocolVersion: msg.params?.protocolVersion ?? '2025-06-18',
-        capabilities: { experimental: { 'claude/channel': {} } },
-        serverInfo: { name: 'codex-bridge', version: VERSION },
-        instructions: `Messages from Codex CLI, running in this folder, arrive as <channel source="codex-bridge" sender="codex">. ` +
-          `Reply with normal text: your final reply is delivered to Codex automatically by the codex-bridge Stop hook. ` +
-          `Never call a tool to send it. End your reply with [DONE] when the conversation should end.`,
-      } })
-      else if (msg.method === 'ping') write({ id: msg.id, result: {} })
-      else if (msg.method === 'tools/list') write({ id: msg.id, result: { tools: [] } })
-      else write({ id: msg.id, error: { code: -32601, message: `unknown method ${msg.method}` } })
+      const response = channelResponse(msg, VERSION)
+      if (response) write(response)
     }
   })
-  process.stdin.on('end', () => process.exit(0))
+  process.stdin.on('end', () => process.stdout.end(() => process.exit(0)))
 
   if (!channelRegistered()) return // not enabled for this session: the Stop hook keeps delivering by waiting
   const tick = () => {

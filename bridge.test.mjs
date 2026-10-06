@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { channelResponse } from './channel-protocol.mjs'
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -568,31 +569,36 @@ test('named queue request targets one idle Codex session through the relay', asy
   assert.deepEqual(readdirSync(join(BDIR, 'alpha')).filter(name => name.startsWith('queue-')), [])
 })
 
-test('channel: MCP handshake, then pushes new Codex blocks as notifications and advances seen', async () => {
+test('channel: MCP initialize response and Codex block notifications', async () => {
   reset()
   mkdirSync(BDIR, { recursive: true }); writeFileSync(CHAT, '')
-  const p = spawn(process.execPath, [BRIDGE, 'channel'], { cwd: DIR, env: { ...env, CODEX_BRIDGE_CHANNEL: '1' }, stdio: ['pipe', 'pipe', 'inherit'] })
-  const lines = []
-  let buf = ''
-  p.stdout.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { lines.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1) } })
-  p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } }) + '\n')
-  p.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
-  await sleep(400)
-  const init = lines.find(l => l.id === 1)
+  const init = channelResponse({ id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } }, '0.2.0')
   assert.deepEqual(init.result.capabilities, { experimental: { 'claude/channel': {} } })
   assert.match(init.result.instructions, /Never call a tool/)
-  await sleep(700)
-  assert.equal(readFileSync(join(BDIR, 'claude.channel'), 'utf8'), String(p.pid)) // claimed delivery
-  await run(['say', 'ping from user'])
-  await stop('codex', 'ping from codex', 'codex-1', {}) // appends and waits; we do not await it here
-  await sleep(1200)
-  const pushed = lines.filter(l => l.method === 'notifications/claude/channel')
-  assert.deepEqual(pushed.map(n => [n.params.meta.sender, n.params.content]), [['user', 'ping from user'], ['codex', 'ping from codex']])
-  assert.equal(JSON.parse(readFileSync(join(BDIR, 'claude.json'), 'utf8')).seen, 2)
-  p.stdin.end()
-  await new Promise(r => p.on('exit', r))
-  assert.ok(!existsSync(join(BDIR, 'claude.channel'))) // marker released on exit
-  reset()
+  assert.equal(channelResponse({ method: 'notifications/initialized' }, '0.2.0'), null)
+
+  const output = join(DIR, 'channel.out')
+  const fd = openSync(output, 'w')
+  const p = spawn('sh', ['-c', `sleep 10 | "${process.execPath}" "${BRIDGE}" channel`], {
+    cwd: DIR, env: { ...env, CODEX_BRIDGE_CHANNEL: '1' }, stdio: ['ignore', fd, 'inherit'], detached: true,
+  })
+  try {
+    await sleep(700)
+    const channelPid = Number(readFileSync(join(BDIR, 'claude.channel'), 'utf8'))
+    assert.ok(channelPid > 0 && channelPid !== p.pid && process.kill(channelPid, 0)) // child claimed delivery
+    await run(['say', 'ping from user'])
+    await stop('codex', '@claude ping from codex', 'codex-1', {}, { CODEX_BRIDGE_WAIT_MS: '0' })
+    await sleep(700)
+    const pushed = readFileSync(output, 'utf8').trim().split('\n').map(JSON.parse).filter(l => l.method === 'notifications/claude/channel')
+    assert.deepEqual(pushed.map(n => [n.params.meta.sender, n.params.content]), [['user', 'ping from user'], ['codex', 'ping from codex']])
+    assert.equal(JSON.parse(readFileSync(join(BDIR, 'claude.json'), 'utf8')).seen, 2)
+  } finally {
+    const exited = p.exitCode !== null ? Promise.resolve() : new Promise(r => p.once('exit', r))
+    try { process.kill(-p.pid, 'SIGTERM') } catch {}
+    await exited
+    closeSync(fd)
+    reset()
+  }
 })
 
 test('channel: stays silent when Claude Code was not started with the channel enabled', async () => {
@@ -603,8 +609,9 @@ test('channel: stays silent when Claude Code was not started with the channel en
   p.stdout.on('data', d => { out += d })
   await run(['say', 'hello'])
   await sleep(1200)
+  const exited = p.exitCode !== null ? Promise.resolve() : new Promise(r => p.once('exit', r))
   p.stdin.end()
-  await new Promise(r => p.on('exit', r))
+  await exited
   assert.equal(out, '')
   assert.ok(!existsSync(join(BDIR, 'claude.channel')))
   reset()
