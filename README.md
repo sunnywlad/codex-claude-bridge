@@ -154,6 +154,17 @@ Clone the repo. Put the two hooks from `hooks/hooks.json` into `<folder>/.claude
 node --test
 ```
 
+## Not done, set aside on 2026-10-06
+
+What works: Claude to Codex through `codex queue` (by UUID or by session name), Codex to Claude through a named chat, 48 tests. The following was dropped on purpose and may come back.
+
+- **Relay as a systemd service.** The `relay` command and a user unit exist but the service is not installed or tested. The relay only runs from a normal terminal, because `codex queue` fails inside the Codex sandbox (`~/.codex` is read-only there).
+- **Codex to Codex.** There is no direct path. It would need `codex queue` from a sandbox that cannot write `~/.codex`, or a shared file read at the next turn. Today everything goes through the Claude orchestrator.
+- **More than two sessions on the bridge.** A chat has one Claude member and one Codex member. Several Codex workers reporting to one Claude would need either one chat per worker or a tested `say --bridge <name>` from a non-member. Neither is built.
+- **Stable session identity.** `/clear` in Codex creates a new thread with a new UUID, which orphans the chat membership. Session names are the intended fix; renaming is not verified.
+- **At-least-once delivery.** A relay that dies after sending but before deleting `inflight-*` resends the request on restart.
+- **Silent channel switch.** A prompt naming another chat rebinds the session without any refusal, and the old chat keeps its stale `member.json`.
+
 ## Earlier design
 
 [v0.1.0](https://github.com/abhishekgahlot2/codex-claude-bridge/releases/tag/v0.1.0) used a blocking Codex MCP tool, a local HTTP server, and a web UI. One-directional in practice.
