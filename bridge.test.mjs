@@ -414,6 +414,17 @@ test('default bridge also leaves unrelated status replies local', async () => {
   assert.equal(chat(), '')
 })
 
+test('an addressed WAITING reply after DONE preserves the named transcript', async () => {
+  reset()
+  await prompt('codex', 'discuss with claude bridge alpha: test', 'codex-alpha')
+  const file = join(BDIR, 'alpha', 'chat.md')
+  writeFileSync(file, '## claude @ 2026-10-06T00:00:00.000Z\nfinished [DONE]\n\n')
+  const before = readFileSync(file, 'utf8')
+  assert.match(await prompt('codex', 'continue', 'codex-alpha'), /finished \[DONE\]/)
+  assert.equal(await stop('codex', '@claude alpha: [WAITING]', 'codex-alpha'), null)
+  assert.equal(readFileSync(file, 'utf8'), before)
+})
+
 test('a replaced named member cannot add messages to the old bridge', async () => {
   reset()
   await prompt('codex', 'discuss with claude bridge alpha: old', 'codex-old')

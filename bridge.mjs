@@ -265,16 +265,17 @@ async function hook(arg) {
   const plainAddress = new RegExp(`^@${other}(?:(?:[:,]\\s*)|\\s+)`, 'i').exec(mine)
   const addressed = explicitAddress ? explicitAddress[1].toLowerCase() === name : name === 'default' && !!plainAddress
   if (addressed) mine = mine.slice((explicitAddress || plainAddress)[0].length).trim()
+  const listening = tagged(mine, '[WAITING]')
   let all = existsSync(CHAT) ? (parse() ?? []) : null
-  if (all === null) { if (!addressed) return; open(); all = [] } // no bridge here: only an @-addressed reply opens one
-  else if (addressed && done(all)) { open(); all = [] }          // a new @-addressed reply after [DONE] starts over
+  if (all === null) { if (!addressed || listening) return; open(); all = [] }
+  else if (addressed && done(all) && !listening) { open(); all = [] }
 
   const state = bind(me, all)
   const unread = () => all.slice(state.seen).filter(b => b.from !== me)
   if (done(all) && !unread().length) return // conversation over: later chatter is not logged
   const forwarding = addressed || state.pending
   if (!forwarding && !unread().length) return
-  if (mine && forwarding && !tagged(mine, '[WAITING]')) {
+  if (mine && forwarding && !listening) {
     append(me, mine)
     state.pending = false
     saveState(me, state)
