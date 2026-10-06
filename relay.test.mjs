@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,9 +11,10 @@ function fixture(t) {
   const project = mkdtempSync(join(tmpdir(), 'codex-bridge-relay-'))
   const root = join(project, '.codex-bridge')
   const log = join(project, 'codex-log.jsonl')
+  const claimLog = join(project, 'claim-log.jsonl')
   const fakeCodex = join(project, 'fake-codex')
   mkdirSync(root)
-  writeFileSync(fakeCodex, `#!/usr/bin/env node\nconst fs = require('node:fs');\nconst args = process.argv.slice(2);\nfs.appendFileSync(process.env.TEST_CODEX_LOG, JSON.stringify(args) + '\\n');\nif (args.includes('--thread') && args[args.indexOf('--thread') + 1] === 'thread-alpha') process.exit(7);\n`)
+  writeFileSync(fakeCodex, `#!/usr/bin/env node\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst args = process.argv.slice(2);\nfs.appendFileSync(process.env.TEST_CODEX_LOG, JSON.stringify(args) + '\\n');\nfs.appendFileSync(process.env.TEST_CLAIM_LOG, JSON.stringify(fs.readdirSync(path.join(process.cwd(), '.codex-bridge', 'alpha'))) + '\\n');\nsetTimeout(() => { if (args.includes('--thread') && args[args.indexOf('--thread') + 1] === 'thread-alpha') process.exit(7); }, Number(process.env.TEST_CODEX_DELAY || 0));\n`)
   chmodSync(fakeCodex, 0o755)
   t.after(() => rmSync(project, { recursive: true, force: true }))
 
@@ -30,13 +31,39 @@ function fixture(t) {
     return dir
   }
   const run = (...args) => {
-    const env = { ...process.env, CODEX_BRIDGE_CODEX_BIN: fakeCodex, TEST_CODEX_LOG: log }
+    const env = { ...process.env, CODEX_BRIDGE_CODEX_BIN: fakeCodex, TEST_CODEX_LOG: log, TEST_CLAIM_LOG: claimLog }
     delete env.NODE_TEST_CONTEXT
     return spawnSync(process.execPath, [BRIDGE, ...args], { cwd: project, encoding: 'utf8', env })
   }
+  const runAsync = (...args) => {
+    const env = { ...process.env, CODEX_BRIDGE_CODEX_BIN: fakeCodex, TEST_CODEX_LOG: log, TEST_CLAIM_LOG: claimLog, TEST_CODEX_DELAY: '1200' }
+    delete env.NODE_TEST_CONTEXT
+    return new Promise(resolve => {
+      const child = spawn(process.execPath, [BRIDGE, ...args], { cwd: project, encoding: 'utf8', env, stdio: 'ignore' })
+      child.on('error', error => resolve({ status: null, error }))
+      child.on('exit', (status, signal) => resolve({ status, signal }))
+    })
+  }
   const calls = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []
-  return { project, root, bridge, run, calls }
+  const claimSnapshots = () => existsSync(claimLog) ? readFileSync(claimLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []
+  return { project, root, bridge, run, runAsync, calls, claimSnapshots }
 }
+
+test('relay holds one project flock and claims a queue item before sending it', async t => {
+  const f = fixture(t)
+  const queueId = '11111111-1111-4111-8111-111111111111'
+  const dir = f.bridge('alpha', 'thread-live', [[queueId, 'only once']])
+  const first = f.runAsync('relay', '--once', '--project', f.project)
+  for (let attempt = 0; attempt < 100 && !f.calls().length; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.ok(f.claimSnapshots().some(names => names.includes(`inflight-${queueId}.json`)), 'the queue file is renamed before codex queue runs')
+  const second = f.run('relay', '--once', '--project', f.project)
+  assert.equal(second.status, 1)
+  assert.equal((await first).status, 0)
+  assert.deepEqual(f.calls(), [['queue', '--thread', 'thread-live', '--message', 'only once']])
+  assert.deepEqual(readdirSync(dir).filter(name => /^(queue|inflight)-/.test(name)), [])
+})
 
 test('relay --once drains queues for every named bridge, including later bridges after one fails', t => {
   const f = fixture(t)

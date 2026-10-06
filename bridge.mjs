@@ -23,11 +23,11 @@
  *
  * Per-side state in ./.codex-bridge/<side>.json: how many blocks that side has seen.
  */
-import { execFile, execFileSync } from 'node:child_process'
+import { execFile, execFileSync, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 const VERSION = '0.2.0'
@@ -197,16 +197,33 @@ function sendToCodex(message) {
 }
 
 async function drainQueue() {
+  // A previous relay may have died after claiming an item. The project flock ensures
+  // there is no live owner before these claims are returned to the pending queue.
+  for (const file of readdirSync(DIR).filter(name => /^inflight-[0-9a-f-]+\.json$/.test(name))) {
+    const pending = file.replace(/^inflight-/, 'queue-')
+    try { renameSync(join(DIR, file), join(DIR, pending)) } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
+  }
   for (const file of readdirSync(DIR).filter(name => /^queue-[0-9a-f-]+\.json$/.test(name))) {
+    const path = join(DIR, file)
+    const claimed = join(DIR, file.replace(/^queue-/, 'inflight-'))
     try {
-      const path = join(DIR, file)
-      const { thread, message } = JSON.parse(readFileSync(path, 'utf8'))
+      renameSync(path, claimed)
+    } catch (err) {
+      if (err.code === 'ENOENT') continue
+      console.error(`codex-bridge queue claim: ${err.message}`)
+      return false
+    }
+    try {
+      const { thread, message } = JSON.parse(readFileSync(claimed, 'utf8'))
       const current = JSON.parse(readFileSync(stateFile('codex'), 'utf8')).thread
-      if (thread !== current) { rmSync(path); continue }
+      if (thread !== current) { rmSync(claimed); continue }
       await execFileAsync(process.env.CODEX_BRIDGE_CODEX_BIN || 'codex',
         ['queue', '--thread', thread, '--message', message], { timeout: 30_000 })
-      rmSync(path)
+      rmSync(claimed)
     } catch (err) {
+      try { renameSync(claimed, path) } catch {}
       console.error(`codex-bridge queue: ${err.message}`)
       return false
     }
@@ -525,15 +542,34 @@ switch (cmd) {
   case 'relay': {
     let project = process.cwd()
     let once = false
+    let locked = false
     let valid = true
     for (let i = 0; i < rest.length; i++) {
       if (rest[i] === '--once' && !once) once = true
+      else if (rest[i] === '--_locked' && !locked) locked = true
       else if (rest[i] === '--project' && rest[i + 1] && !rest[i + 1].startsWith('--')) project = rest[++i]
       else valid = false
     }
     if (!valid) {
       console.error('usage: bridge.mjs relay [--once] [--project <path>]')
       process.exit(1)
+    }
+    if (!locked) {
+      const absoluteProject = resolve(project)
+      const lockPath = join(absoluteProject, '.codex-bridge', 'relay.lock')
+      mkdirSync(dirname(lockPath), { recursive: true })
+      const args = ['-n', '-E', '75', lockPath, process.execPath,
+        resolve(process.argv[1]), 'relay', '--_locked', '--project', absoluteProject,
+        ...(once ? ['--once'] : [])]
+      const result = spawnSync(process.env.CODEX_BRIDGE_FLOCK_BIN || '/usr/bin/flock', args, { stdio: 'inherit' })
+      if (result.error) {
+        console.error(`codex-bridge relay: cannot start flock: ${result.error.message}`)
+        process.exitCode = 1
+      } else if (result.status === 75) {
+        console.error(`codex-bridge relay: another relay already holds ${lockPath}`)
+        process.exitCode = 1
+      } else process.exitCode = result.status ?? 1
+      break
     }
     if (once) {
       if (!await relayAll(project)) process.exitCode = 1
