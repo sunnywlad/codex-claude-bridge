@@ -237,14 +237,26 @@ test('Claude Stop hook does not wait while a live channel owns delivery', async 
   reset()
 })
 
+test('Claude Stop hook returns immediately when the channel is already alive', async () => {
+  reset()
+  mkdirSync(BDIR, { recursive: true })
+  writeFileSync(CHAT, '## codex @ 2026-10-06T12:00:00.000Z\nQuestion?\n\n')
+  writeFileSync(join(BDIR, 'claude.channel'), String(process.pid))
+  const started = Date.now()
+  assert.equal(await stop('claude', '@codex Answer'), null)
+  assert.ok(Date.now() - started < 250, 'live channel should make Stop return without polling delay')
+  assert.match(chat(), /Answer/)
+  reset()
+})
+
 test('Claude Stop hook that opens the bridge returns once the channel claims the folder a moment later', async () => {
   reset()
-  const t0 = Date.now()
   const claudeStop = stop('claude', '@codex Redis or Memcached?')
   await sleep(700)
+  const claimedAt = Date.now()
   writeFileSync(join(BDIR, 'claude.channel'), String(process.pid)) // channel claims the new bridge
   assert.equal(await claudeStop, null)
-  assert.ok(Date.now() - t0 < 2500, 'returned as soon as the channel appeared')
+  assert.ok(Date.now() - claimedAt < 250, 'returned promptly after the channel became active')
   assert.match(chat(), /## claude @ [^\n]+\nRedis or Memcached\?/)
   reset()
 })

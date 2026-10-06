@@ -360,9 +360,9 @@ async function hook(arg) {
     saveState(me, state)
     if (me === 'claude') wakeCodex()
   }
-  if (me === 'claude') for (let i = 0; i < 4; i++) { // the channel claims a fresh bridge within one tick: give it a moment
+  if (me === 'claude') for (let i = 0; i < 80; i++) { // give a newly starting channel up to 2s to claim this bridge
     if (channelAlive()) return // the channel wakes Claude; no need to hold the terminal
-    await new Promise(r => setTimeout(r, 500))
+    await new Promise(r => setTimeout(r, 25))
   }
 
   const deadline = Date.now() + WAIT_MS
