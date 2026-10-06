@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 /**
- * Codex Bridge — Claude Code <-> Codex CLI in one folder, through one shared file. No server.
+ * Codex Bridge — Claude Code <-> Codex CLI in one folder, through named chats. No server.
  *
  *   node bridge.mjs hook      Stop + UserPromptSubmit hook for both tools (side auto-detected)
  *   node bridge.mjs channel   Claude Code channel (MCP over stdio): pushes Codex's messages into Claude
  *   node bridge.mjs say ...   append a message as the human observer
  *
- * The chat is ./.codex-bridge/chat.md of the folder both agents run in. One block per message:
+ * Chats live in ./.codex-bridge/<name>/chat.md (or chat.md at the root for default).
+ * One block per message:
  *
  *   ## codex @ 2026-09-08T10:15:02.113Z
  *   text...
  *
- * A reply that starts with @claude (or @codex) opens the bridge. From then on every reply is appended
- * by the Stop hook. The other side gets it either through the channel (Claude, when Claude Code runs
+ * A reply that starts with @claude or @codex opens the default bridge. Named bridges use
+ * @claude <name>: or @codex <name>:. A direct reply to an incoming bridge message is also forwarded.
+ * The other side gets it either through the channel (Claude, when Claude Code runs
  * with the channel enabled) or by its own Stop hook waiting on the file and returning
  * {"decision":"block","reason":...}, which becomes its next prompt. [WAITING] at the start or end of
  * a reply means listen only; [DONE] ends the conversation; a new @claude/@codex reply reopens it.
@@ -20,6 +22,7 @@
  * Per-side state in ./.codex-bridge/<side>.json: how many blocks that side has seen.
  */
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, rmSync, statSync, watch, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -31,12 +34,41 @@ const MARK = /^## (claude|codex|user|bridge) @ \d{4}-\d\d-\d\dT[\d:.]+Z$/
 const SIDES = ['claude', 'codex']
 const NAMES = { claude: 'Claude Code', codex: 'Codex CLI' }
 
-let DIR, CHAT, MARKER, WAITING
-function setDir(cwd) {
-  DIR = join(cwd, '.codex-bridge')
+let ROOT, DIR, CHAT, MARKER, WAITING, BRIDGE_NAME
+function setDir(cwd, name = 'default') {
+  ROOT = join(cwd, '.codex-bridge')
+  BRIDGE_NAME = name
+  DIR = name === 'default' ? ROOT : join(ROOT, name)
   CHAT = join(DIR, 'chat.md')
   MARKER = join(DIR, 'claude.channel') // pid of the channel process that delivers to Claude
   WAITING = join(DIR, 'codex.waiting')
+}
+
+const validName = name => typeof name === 'string' && /^[a-z][a-z0-9_-]{0,39}$/.test(name)
+const sessionFile = (side, id) => join(ROOT, 'sessions', `${side}-${createHash('sha256').update(id).digest('hex')}.json`)
+function sessionName(side, id) {
+  if (!id) return 'default'
+  try { return JSON.parse(readFileSync(sessionFile(side, id), 'utf8')).name } catch { return 'default' }
+}
+function member(side, id, name) {
+  if (!id || !validName(name)) return
+  mkdirSync(join(ROOT, 'sessions'), { recursive: true })
+  writeFileSync(join(ROOT, '.gitignore'), '*\n')
+  writeFileSync(sessionFile(side, id), JSON.stringify({ id, name, pid: process.ppid }))
+  mkdirSync(DIR, { recursive: true })
+  try {
+    const previous = JSON.parse(readFileSync(join(DIR, `${side}.member.json`), 'utf8'))
+    if (previous.id !== id) rmSync(side === 'claude' ? MARKER : WAITING, { force: true })
+  } catch {}
+  writeFileSync(join(DIR, `${side}.member.json`), JSON.stringify({ id, pid: process.ppid }))
+}
+function currentMember(side, id) {
+  if (BRIDGE_NAME === 'default' || !id) return true
+  try { return JSON.parse(readFileSync(join(DIR, `${side}.member.json`), 'utf8')).id === id } catch { return false }
+}
+function namedPrompt(prompt, other) {
+  const match = new RegExp(`\\b${other}[ -]?bridge\\s+([a-z][a-z0-9_-]{0,39})\\s*:`, 'i').exec(prompt ?? '')
+  return match?.[1].toLowerCase()
 }
 
 /** Blocks in the file, or null while another writer's block is still landing (every complete block ends with a blank line). */
@@ -133,7 +165,7 @@ function wakeCodex() {
   try {
     let thread
     try { thread = JSON.parse(readFileSync(stateFile('codex'), 'utf8')).thread } catch {}
-    thread = process.env.CODEX_BRIDGE_THREAD || thread || discoverCodexThread()
+    thread = BRIDGE_NAME === 'default' ? (process.env.CODEX_BRIDGE_THREAD || thread || discoverCodexThread()) : thread
     if (typeof thread !== 'string' || !thread.trim()) return
     execFileSync(process.env.CODEX_BRIDGE_CODEX_BIN || 'codex',
       ['queue', '--thread', thread, '--message', 'New message available.'], { timeout: 30_000 })
@@ -162,10 +194,10 @@ const NOT_THIS = {
 }
 const context = (me, other) =>
   `${NAMES[other].split(' ')[0]} Bridge: the user wants you to talk to ${NAMES[other]}, which is running in a separate terminal in this same folder. ` +
-  `The only way to reach it is to start your reply with @${other}. Everything you write after that is delivered to ${other} by a hook, ` +
+  `This conversation uses bridge ${BRIDGE_NAME}. Start your reply with @${other}${BRIDGE_NAME === 'default' ? '' : ` ${BRIDGE_NAME}:`}. Your reply is delivered to ${other} by a hook, ` +
   `and ${other}'s replies come back to you as channel messages or as your next prompt. ` +
   `Do not use ${NOT_THIS[other]}; those start a different ${NAMES[other].split(' ')[0]} and are not the bridge. ` +
-  `Reply with just [WAITING] to listen without saying anything. End your reply with [DONE] when the conversation should end.`
+  `Reply with just [WAITING] to listen without saying anything. End your reply with [DONE] when the conversation should end. Only an addressed reply or a reply to a bridge message is forwarded.`
 
 function bind(me, all) { // every session in this folder takes part; hooks are configured per folder
   const state = loadState(me, all[0]?.head ?? '')
@@ -175,7 +207,7 @@ function bind(me, all) { // every session in this folder takes part; hooks are c
 
 function promptHook(me, other, input) {
   const isOpen = existsSync(CHAT)
-  const mentions = new RegExp(`\\b${other}[ -]?bridge\\b`, 'i').test(input.prompt ?? '') // "discuss with codex bridge: ..."
+  const mentions = new RegExp(`\\b${other}[ -]?bridge\\b`, 'i').test(input.prompt ?? '')
   if (!isOpen && !mentions) return
   let extra = ''
   if (isOpen) {
@@ -184,6 +216,7 @@ function promptHook(me, other, input) {
     const fresh = all.slice(state.seen).filter(b => b.from !== me)
     if (fresh.length && !(me === 'claude' && channelAlive())) { // the channel delivers for Claude; otherwise hand over what is waiting
       state.seen = all.length
+      state.pending = true
       saveState(me, state)
       extra = `\n\nUnread from the bridge:\n\n${fresh.map(fmt).join('\n\n')}`
     }
@@ -194,9 +227,16 @@ function promptHook(me, other, input) {
 async function hook(arg) {
   const raw = readFileSync(0, 'utf8')
   const input = JSON.parse(raw || '{}')
-  setDir(input.cwd ?? process.cwd())
   const me = side(arg, input)
   const other = me === 'claude' ? 'codex' : 'claude'
+  const cwd = input.cwd ?? process.cwd()
+  setDir(cwd)
+  const id = input.session_id
+  const requested = input.hook_event_name === 'UserPromptSubmit' ? namedPrompt(input.prompt, other) : undefined
+  const name = requested || sessionName(me, id)
+  setDir(cwd, validName(name) ? name : 'default')
+  if (requested || (name !== 'default' && currentMember(me, id))) member(me, id, name)
+  if (name !== 'default' && !currentMember(me, id)) return
   if (process.env.CODEX_BRIDGE_DEBUG !== undefined ||
       existsSync(join(DIR, 'debug')) ||
       existsSync(join(homedir(), '.codex-bridge', 'debug'))) {
@@ -209,7 +249,7 @@ async function hook(arg) {
       bridgeEnv: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('CODEX_BRIDGE_')))
     }))
   }
-  if (me === 'codex') {
+  if (me === 'codex' && (name === 'default' || requested || currentMember(me, id))) {
     const thread = process.env.CODEX_BRIDGE_THREAD || input.session_id || input.thread_id
     if (typeof thread === 'string' && thread.trim()) {
       mkdirSync(DIR, { recursive: true })
@@ -221,8 +261,10 @@ async function hook(arg) {
   if (input.hook_event_name === 'UserPromptSubmit') return promptHook(me, other, input)
 
   let mine = input.last_assistant_message?.trim() ?? ''
-  const addressed = new RegExp(`^@${other}\\b`, 'i').test(mine)
-  if (addressed) mine = mine.replace(/^@\w+[:,]?\s*/, '')
+  const explicitAddress = new RegExp(`^@${other}\\s+([a-z][a-z0-9_-]{0,39}):\\s*`, 'i').exec(mine)
+  const plainAddress = new RegExp(`^@${other}(?:(?:[:,]\\s*)|\\s+)`, 'i').exec(mine)
+  const addressed = explicitAddress ? explicitAddress[1].toLowerCase() === name : name === 'default' && !!plainAddress
+  if (addressed) mine = mine.slice((explicitAddress || plainAddress)[0].length).trim()
   let all = existsSync(CHAT) ? (parse() ?? []) : null
   if (all === null) { if (!addressed) return; open(); all = [] } // no bridge here: only an @-addressed reply opens one
   else if (addressed && done(all)) { open(); all = [] }          // a new @-addressed reply after [DONE] starts over
@@ -230,8 +272,12 @@ async function hook(arg) {
   const state = bind(me, all)
   const unread = () => all.slice(state.seen).filter(b => b.from !== me)
   if (done(all) && !unread().length) return // conversation over: later chatter is not logged
-  if (mine && !tagged(mine, '[WAITING]')) {
+  const forwarding = addressed || state.pending
+  if (!forwarding && !unread().length) return
+  if (mine && forwarding && !tagged(mine, '[WAITING]')) {
     append(me, mine)
+    state.pending = false
+    saveState(me, state)
     if (me === 'claude') wakeCodex()
   }
   if (me === 'claude') for (let i = 0; i < 4; i++) { // the channel claims a fresh bridge within one tick: give it a moment
@@ -249,6 +295,7 @@ async function hook(arg) {
       const fresh = unread()
       if (fresh.length) {
         state.seen = all.length
+        state.pending = true
         saveState(me, state)
         const reason =
           `New message${fresh.length > 1 ? 's' : ''} via codex-bridge:\n\n${fresh.map(fmt).join('\n\n')}` +
@@ -290,9 +337,32 @@ function channelRegistered() {
 }
 
 /** Claude Code channel: a one-way MCP server over stdio that pushes new blocks from the other side into the session. */
-function channel() {
+function channel(sessionId) {
   setDir(process.cwd())
   const me = 'claude'
+  const owned = new Set()
+  const selectBridge = () => {
+    setDir(process.cwd())
+    if (sessionId) {
+      setDir(process.cwd(), sessionName('claude', sessionId))
+      return
+    }
+    let latest
+    try {
+      for (const file of readdirSync(join(ROOT, 'sessions'))) {
+        if (!file.startsWith('claude-')) continue
+        const path = join(ROOT, 'sessions', file)
+        const entry = JSON.parse(readFileSync(path, 'utf8'))
+        if (entry.name !== 'default') {
+          const active = JSON.parse(readFileSync(join(ROOT, entry.name, 'claude.member.json'), 'utf8'))
+          if (active.id !== entry.id) continue
+        }
+        if (entry.pid === process.ppid && (!latest || statSync(path).mtimeMs > latest.mtime))
+          latest = { name: entry.name, mtime: statSync(path).mtimeMs }
+      }
+    } catch {}
+    setDir(process.cwd(), latest?.name ?? 'default')
+  }
   const write = msg => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...msg }) + '\n')
   let buf = ''
   process.stdin.on('data', chunk => {
@@ -321,9 +391,16 @@ function channel() {
 
   if (!channelRegistered()) return // not enabled for this session: the Stop hook keeps delivering by waiting
   const tick = () => {
+    selectBridge()
+    for (const marker of owned) {
+      if (marker === MARKER) continue
+      try { if (Number(readFileSync(marker, 'utf8')) === process.pid) rmSync(marker) } catch {}
+      owned.delete(marker)
+    }
     if (!existsSync(CHAT)) return
     if (!channelAlive()) writeFileSync(MARKER, String(process.pid))     // claim delivery for this folder
     if (Number(readFileSync(MARKER, 'utf8')) !== process.pid) return    // another Claude session's channel owns it
+    owned.add(MARKER)
     let all
     try { all = parse() } catch { return }
     if (!all) return
@@ -331,6 +408,7 @@ function channel() {
     const fresh = all.slice(state.seen).filter(b => b.from !== me)
     if (!fresh.length) return
     state.seen = all.length
+    state.pending = true
     saveState(me, state)
     for (const b of fresh) write({ method: 'notifications/claude/channel', params: {
       content: b.text,
@@ -338,7 +416,7 @@ function channel() {
     } })
   }
   setInterval(tick, 500)
-  process.on('exit', () => { try { if (Number(readFileSync(MARKER, 'utf8')) === process.pid) rmSync(MARKER) } catch {} })
+  process.on('exit', () => { for (const marker of owned) try { if (Number(readFileSync(marker, 'utf8')) === process.pid) rmSync(marker) } catch {} })
 }
 
 const [cmd, ...rest] = process.argv.slice(2)
@@ -347,7 +425,7 @@ switch (cmd) {
     await hook(rest[0])
     break
   case 'channel':
-    channel()
+    channel(rest[0])
     break
   case 'say':
     setDir(process.cwd())

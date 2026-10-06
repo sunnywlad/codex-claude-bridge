@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -19,6 +19,7 @@ delete env.PLUGIN_DATA
 delete env.CODEX_BRIDGE_CHANNEL
 delete env.CODEX_BRIDGE_THREAD
 delete env.CODEX_BRIDGE_DEBUG
+delete env.NODE_TEST_CONTEXT
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const chat = () => readFileSync(CHAT, 'utf8')
 const reset = () => {
@@ -26,12 +27,18 @@ const reset = () => {
   rmSync(SESSION_ROOT, { recursive: true, force: true })
 }
 
+let outputSerial = 0
 function run(args, stdin = '', extraEnv = {}) {
   return new Promise(resolve => {
-    const p = spawn(process.execPath, [BRIDGE, ...args], { cwd: DIR, env: { ...env, ...extraEnv }, stdio: ['pipe', 'pipe', 'inherit'] })
-    let out = ''
-    p.stdout.on('data', d => { out += d })
-    p.on('close', () => resolve(out.trim()))
+    const file = join(DIR, `hook-output-${outputSerial++}`)
+    const fd = openSync(file, 'w')
+    const p = spawn(process.execPath, [BRIDGE, ...args], { cwd: DIR, env: { ...env, ...extraEnv }, stdio: ['pipe', fd, 'inherit'] })
+    p.on('close', () => {
+      closeSync(fd)
+      const out = readFileSync(file, 'utf8').trim()
+      rmSync(file)
+      resolve(out)
+    })
     p.stdin.end(stdin)
   })
 }
@@ -70,7 +77,7 @@ test('no bridge and no @-address: hooks are no-ops', async () => {
   reset()
   assert.equal(await stop('claude', 'hello'), null)
   assert.equal(await prompt('claude', 'fix the tests'), null)
-  assert.ok(!existsSync(BDIR))
+  assert.ok(!existsSync(CHAT))
 })
 
 test('@claude at the start of a Codex reply opens the bridge, strips the prefix, waits for Claude', async () => {
@@ -224,7 +231,7 @@ test('Claude Stop hook does not wait while a live channel owns delivery', async 
   await sleep(300)
   writeFileSync(join(BDIR, 'claude.channel'), String(process.pid)) // a live channel
   const t = Date.now()
-  assert.equal(await stop('claude', 'A'), null)
+  assert.equal(await stop('claude', '@codex A'), null)
   assert.ok(Date.now() - t < 1500, 'returned without waiting')
   assert.match((await codexWaiting).reason, /\[claude\] A/)
   reset()
@@ -247,7 +254,7 @@ test('Claude wakes idle Codex with the saved configured thread and a short queue
   const thread = '01a11151-0f06-70b1-949b-f1a3be4513b2'
   await prompt('codex', 'go', 'codex-1', { CODEX_BRIDGE_THREAD: thread })
   assert.equal(JSON.parse(readFileSync(join(BDIR, 'codex.json'), 'utf8')).thread, thread)
-  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, wakeEnv), null)
   assert.deepEqual(wakeCalls(), [['queue', '--thread', thread, '--message', 'New message available.']])
 })
 
@@ -266,7 +273,7 @@ test('Claude does not queue while the Codex Stop hook is waiting', async () => {
   readyToWake()
   await prompt('codex', 'go', 'codex-1', { CODEX_BRIDGE_THREAD: 'codex-thread' })
   writeFileSync(join(BDIR, 'codex.waiting'), String(process.pid))
-  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, wakeEnv), null)
   assert.deepEqual(wakeCalls(), [])
 })
 
@@ -274,20 +281,20 @@ test('a stale waiting marker does not prevent the wake', async () => {
   readyToWake()
   await prompt('codex', 'go', 'codex-1', { CODEX_BRIDGE_THREAD: 'codex-thread' })
   writeFileSync(join(BDIR, 'codex.waiting'), '999999999')
-  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, wakeEnv), null)
   assert.equal(wakeCalls().length, 1)
 })
 
 test('without a Codex thread Claude does not queue or crash', async () => {
   readyToWake()
-  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, wakeEnv), null)
   assert.deepEqual(wakeCalls(), [])
 })
 
 test('CODEX_BRIDGE_THREAD supplies the thread when the hook payload has no ID', async () => {
   readyToWake()
   const thread = 'configured-thread'
-  assert.equal(await stop('claude', 'A', 'claude-1', {}, { ...wakeEnv, CODEX_BRIDGE_THREAD: thread }), null)
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, { ...wakeEnv, CODEX_BRIDGE_THREAD: thread }), null)
   assert.deepEqual(wakeCalls(), [['queue', '--thread', thread, '--message', 'New message available.']])
 })
 
@@ -295,14 +302,14 @@ test('hook session_id is saved for waking Codex when no configured thread exists
   readyToWake()
   await run(['hook', 'codex'], JSON.stringify({ hook_event_name: 'UserPromptSubmit', cwd: DIR, session_id: 'hook-session', thread_id: 'hook-thread', prompt: 'go' }))
   assert.equal(JSON.parse(readFileSync(join(BDIR, 'codex.json'), 'utf8')).thread, 'hook-session')
-  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, wakeEnv), null)
   assert.deepEqual(wakeCalls(), [['queue', '--thread', 'hook-session', '--message', 'New message available.']])
 })
 
 test('configured thread takes priority over the ID saved from a Codex hook', async () => {
   readyToWake()
   await run(['hook', 'codex'], JSON.stringify({ hook_event_name: 'UserPromptSubmit', cwd: DIR, session_id: 'hook-session', prompt: 'go' }))
-  assert.equal(await stop('claude', 'A', 'claude-1', {}, { ...wakeEnv, CODEX_BRIDGE_THREAD: 'configured-thread' }), null)
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, { ...wakeEnv, CODEX_BRIDGE_THREAD: 'configured-thread' }), null)
   assert.deepEqual(wakeCalls(), [['queue', '--thread', 'configured-thread', '--message', 'New message available.']])
 })
 
@@ -313,7 +320,7 @@ test('discovery picks the newest codex-tui rollout in the bridge cwd', async () 
   rollout('newer-good', { originator: 'codex-tui', cwd: DIR, id: 'newer-good' }, new Date(now - 3000))
   rollout('exec', { originator: 'codex_exec', cwd: DIR, id: 'exec' }, new Date(now - 2000))
   rollout('other-cwd', { originator: 'codex-tui', cwd: '/somewhere-else', id: 'other-cwd' }, new Date(now - 1000))
-  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, wakeEnv), null)
   assert.deepEqual(wakeCalls(), [['queue', '--thread', 'newer-good', '--message', 'New message available.']])
 })
 
@@ -323,7 +330,7 @@ test('discovery searches only three days and twenty newest rollouts', async () =
   rollout('old-day', { originator: 'codex-tui', cwd: DIR, id: 'old-day' }, new Date(now), 3)
   rollout('twenty-first', { originator: 'codex-tui', cwd: DIR, id: 'twenty-first' }, new Date(now - 30_000))
   for (let i = 0; i < 20; i++) rollout(`exec-${i}`, { originator: 'codex_exec', cwd: DIR, id: `exec-${i}` }, new Date(now - i * 1000))
-  assert.equal(await stop('claude', 'A', 'claude-1', {}, wakeEnv), null)
+  assert.equal(await stop('claude', '@codex A', 'claude-1', {}, wakeEnv), null)
   assert.deepEqual(wakeCalls(), [])
 })
 
@@ -358,6 +365,89 @@ test('debug environment variable and home fallback each enable capture', async (
   writeFileSync(join(home, '.codex-bridge', 'debug'), '')
   await run(['hook', 'codex'], input, { HOME: home })
   assert.equal(JSON.parse(readFileSync(join(BDIR, 'debug-codex.json'), 'utf8')).input, input)
+})
+
+test('named alpha and beta keep messages and Codex wake targets separate', async () => {
+  reset()
+  rmSync(WAKE_LOG, { force: true })
+  for (const name of ['alpha', 'beta']) {
+    const ctx = await prompt('claude', `discuss with codex bridge ${name}: hello`, `claude-${name}`)
+    assert.match(ctx, new RegExp(`bridge ${name}`))
+    await prompt('codex', `discuss with claude bridge ${name}: hello`, `codex-${name}`)
+    writeFileSync(join(BDIR, name, 'claude.channel'), String(process.pid))
+  }
+  assert.equal((await stop('codex', '@claude alpha: alpha question', 'codex-alpha', {}, { CODEX_BRIDGE_WAIT_MS: '0' })).decision, undefined)
+  assert.equal((await stop('codex', '@claude beta: beta question', 'codex-beta', {}, { CODEX_BRIDGE_WAIT_MS: '0' })).decision, undefined)
+  assert.equal(await stop('claude', '@codex alpha: alpha answer', 'claude-alpha', {}, wakeEnv), null)
+  assert.equal(await stop('claude', '@codex beta: beta answer', 'claude-beta', {}, wakeEnv), null)
+  const alpha = readFileSync(join(BDIR, 'alpha', 'chat.md'), 'utf8')
+  const beta = readFileSync(join(BDIR, 'beta', 'chat.md'), 'utf8')
+  assert.match(alpha, /alpha question[\s\S]*alpha answer/)
+  assert.doesNotMatch(alpha, /beta (question|answer)/)
+  assert.match(beta, /beta question[\s\S]*beta answer/)
+  assert.doesNotMatch(beta, /alpha (question|answer)/)
+  assert.deepEqual(wakeCalls().map(c => c[2]), ['codex-alpha', 'codex-beta'])
+})
+
+test('named bridge ignores unrelated replies and forwards a reply to a delivered message', async () => {
+  reset()
+  await prompt('claude', 'discuss with codex bridge alpha: test', 'claude-alpha')
+  await prompt('codex', 'discuss with claude bridge alpha: test', 'codex-alpha')
+  writeFileSync(join(BDIR, 'alpha', 'claude.channel'), String(process.pid))
+  assert.equal(await stop('claude', 'Progress update for Wladimir.', 'claude-alpha'), null)
+  assert.ok(!existsSync(join(BDIR, 'alpha', 'chat.md')))
+  await stop('codex', '@claude alpha: question', 'codex-alpha', {}, { CODEX_BRIDGE_WAIT_MS: '0' })
+  rmSync(join(BDIR, 'alpha', 'claude.channel'))
+  assert.match(await prompt('claude', 'continue', 'claude-alpha'), /\[codex\] question/)
+  writeFileSync(join(BDIR, 'alpha', 'claude.channel'), String(process.pid))
+  assert.equal(await stop('claude', 'Answer.', 'claude-alpha', {}, wakeEnv), null)
+  assert.match(readFileSync(join(BDIR, 'alpha', 'chat.md'), 'utf8'), /## claude @ [^\n]+\nAnswer\./)
+  assert.equal(await stop('claude', 'Another status.', 'claude-alpha'), null)
+  assert.doesNotMatch(readFileSync(join(BDIR, 'alpha', 'chat.md'), 'utf8'), /Another status/)
+})
+
+test('default bridge also leaves unrelated status replies local', async () => {
+  reset()
+  mkdirSync(BDIR, { recursive: true })
+  writeFileSync(CHAT, '')
+  assert.equal(await stop('claude', 'Working on the tests.'), null)
+  assert.equal(chat(), '')
+})
+
+test('a replaced named member cannot add messages to the old bridge', async () => {
+  reset()
+  await prompt('codex', 'discuss with claude bridge alpha: old', 'codex-old')
+  await prompt('codex', 'discuss with claude bridge alpha: new', 'codex-new')
+  assert.equal(await stop('codex', '@claude alpha: stale', 'codex-old'), null)
+  assert.ok(!existsSync(join(BDIR, 'alpha', 'chat.md')))
+})
+
+test('two named Claude channels deliver only their own chat', async () => {
+  reset()
+  const channels = []
+  for (const name of ['alpha', 'beta']) {
+    await prompt('claude', `discuss with codex bridge ${name}: test`, `claude-${name}`)
+    writeFileSync(join(BDIR, name, 'chat.md'), '')
+    const file = join(DIR, `channel-${name}.out`)
+    const fd = openSync(file, 'w')
+    const proc = spawn('sh', ['-c', `sleep 2 | "${process.execPath}" "${BRIDGE}" channel claude-${name}`], {
+      cwd: DIR, env: { ...env, CODEX_BRIDGE_CHANNEL: '1' }, stdio: ['ignore', fd, 'inherit'],
+    })
+    channels.push({ name, file, fd, proc })
+  }
+  try {
+    for (const { name } of channels)
+      appendFileSync(join(BDIR, name, 'chat.md'), `## codex @ 2026-10-06T00:00:00.000Z\n${name} only\n\n`)
+    await sleep(1200)
+    for (const { name, file } of channels) {
+      const output = readFileSync(file, 'utf8')
+      assert.match(output, new RegExp(`${name} only`))
+      assert.doesNotMatch(output, new RegExp(`${name === 'alpha' ? 'beta' : 'alpha'} only`))
+    }
+  } finally {
+    for (const { proc } of channels) if (proc.exitCode === null) await new Promise(resolve => proc.on('exit', resolve))
+    for (const { fd } of channels) closeSync(fd)
+  }
 })
 
 test('channel: MCP handshake, then pushes new Codex blocks as notifications and advances seen', async () => {
